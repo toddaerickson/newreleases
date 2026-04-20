@@ -33,7 +33,7 @@ def run(
     recheck: bool = False,
     skip_email: bool = False,
 ) -> None:
-    recipient = recipient or os.environ.get("BOOK_RECIPIENT")
+    recipient = (recipient or os.environ.get("BOOK_RECIPIENT", "")).strip("'\" ")
     if not recipient:
         logger.error("No recipient configured. Set BOOK_RECIPIENT env var or use --recipient.")
         sys.exit(1)
