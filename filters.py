@@ -5,8 +5,8 @@ from scraper import Book
 
 def passes_filter(
     book: Book,
-    min_rating: float = 4.3,
-    min_rating_count: int = 500,
+    min_rating: float,
+    min_rating_count: int,
 ) -> bool:
     """Return True if the book meets the rating thresholds."""
     if book.rating is None or book.rating_count is None:

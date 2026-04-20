@@ -1,8 +1,9 @@
 """Markdown output and email notification."""
 
 import logging
-import smtplib
 import os
+import smtplib
+import ssl
 from datetime import date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -13,6 +14,37 @@ from scraper import Book
 logger = logging.getLogger(__name__)
 
 SHORTLISTS_DIR = Path(__file__).parent / "shortlists"
+
+
+def _format_book_entry(i: int, book: Book, markdown: bool = True) -> str:
+    """Format a single book entry for markdown or plaintext."""
+    genres = ", ".join(book.genre_tags) if book.genre_tags else "—"
+    rating_str = f"{book.rating:.2f}" if book.rating else "N/A"
+    count_str = f"{book.rating_count:,}" if book.rating_count else "N/A"
+    pub_str = book.pub_date or "Unknown"
+
+    if markdown:
+        lines = [
+            f"### {i}. {book.title} — {book.author}\n",
+            f"- **Rating:** {rating_str} ({count_str} ratings)",
+            f"- **Published:** {pub_str}",
+            f"- **Genres:** {genres}",
+        ]
+        if book.goodreads_url:
+            lines.append(f"- **Goodreads:** {book.goodreads_url}")
+        lines.append("")
+    else:
+        lines = [
+            f"{i}. {book.title} — {book.author}",
+            f"   Rating: {rating_str} ({count_str} ratings)",
+            f"   Published: {pub_str}",
+            f"   Genres: {genres}",
+        ]
+        if book.goodreads_url:
+            lines.append(f"   Goodreads: {book.goodreads_url}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def write_shortlist(books: list[Book], run_date: date | None = None) -> Path:
@@ -28,18 +60,7 @@ def write_shortlist(books: list[Book], run_date: date | None = None) -> Path:
     else:
         lines.append(f"## New this week ({len(books)})\n")
         for i, book in enumerate(books, 1):
-            genres = ", ".join(book.genre_tags) if book.genre_tags else "—"
-            rating_str = f"{book.rating:.2f}" if book.rating else "N/A"
-            count_str = f"{book.rating_count:,}" if book.rating_count else "N/A"
-            pub_str = book.pub_date or "Unknown"
-
-            lines.append(f"### {i}. {book.title} — {book.author}\n")
-            lines.append(f"- **Rating:** {rating_str} ({count_str} ratings)")
-            lines.append(f"- **Published:** {pub_str}")
-            lines.append(f"- **Genres:** {genres}")
-            if book.goodreads_url:
-                lines.append(f"- **Goodreads:** {book.goodreads_url}")
-            lines.append("")
+            lines.append(_format_book_entry(i, book, markdown=True))
 
     filepath.write_text("\n".join(lines), encoding="utf-8")
     logger.info("Wrote shortlist to %s", filepath)
@@ -51,7 +72,6 @@ def send_email(books: list[Book], recipient: str, run_date: date | None = None) 
     run_date = run_date or date.today()
 
     smtp_host = os.environ.get("SMTP_HOST", "")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     smtp_user = os.environ.get("SMTP_USER", "")
     smtp_pass = os.environ.get("SMTP_PASS", "")
 
@@ -59,24 +79,21 @@ def send_email(books: list[Book], recipient: str, run_date: date | None = None) 
         logger.warning("SMTP not configured — skipping email. Set SMTP_HOST, SMTP_USER, SMTP_PASS.")
         return False
 
-    subject = f"[Books] {len(books)} new candidate{'s' if len(books) != 1 else ''} over 4.3 — {run_date.isoformat()}"
+    try:
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    except ValueError:
+        logger.error("SMTP_PORT must be an integer; got %r", os.environ.get("SMTP_PORT"))
+        return False
 
-    # Build body from the same data
+    count = len(books)
+    subject = f"[Books] {count} new candidate{'s' if count != 1 else ''} over 4.3 — {run_date.isoformat()}"
+
     body_lines = [f"# New book shortlist — {run_date.isoformat()}\n"]
     if not books:
         body_lines.append("No new books passed the filter this week.")
     else:
         for i, book in enumerate(books, 1):
-            genres = ", ".join(book.genre_tags) if book.genre_tags else "—"
-            rating_str = f"{book.rating:.2f}" if book.rating else "N/A"
-            count_str = f"{book.rating_count:,}" if book.rating_count else "N/A"
-            body_lines.append(f"{i}. {book.title} — {book.author}")
-            body_lines.append(f"   Rating: {rating_str} ({count_str} ratings)")
-            body_lines.append(f"   Published: {book.pub_date or 'Unknown'}")
-            body_lines.append(f"   Genres: {genres}")
-            if book.goodreads_url:
-                body_lines.append(f"   Goodreads: {book.goodreads_url}")
-            body_lines.append("")
+            body_lines.append(_format_book_entry(i, book, markdown=False))
 
     body = "\n".join(body_lines)
 
@@ -87,12 +104,19 @@ def send_email(books: list[Book], recipient: str, run_date: date | None = None) 
     msg.attach(MIMEText(body, "plain"))
 
     try:
+        ctx = ssl.create_default_context()
         with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.starttls()
+            server.starttls(context=ctx)
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, [recipient], msg.as_string())
         logger.info("Email sent to %s", recipient)
         return True
-    except Exception as e:
-        logger.error("Failed to send email: %s", e)
+    except smtplib.SMTPAuthenticationError:
+        logger.error("SMTP authentication failed — check SMTP_USER and SMTP_PASS.")
+        return False
+    except smtplib.SMTPException:
+        logger.exception("SMTP error sending email to %s", recipient)
+        return False
+    except OSError:
+        logger.exception("Network error sending email to %s", recipient)
         return False

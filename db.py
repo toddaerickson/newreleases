@@ -1,9 +1,12 @@
 """SQLite persistence for seen books and deduplication."""
 
 import hashlib
+import logging
 import sqlite3
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "seen_books.db"
 
@@ -40,7 +43,11 @@ def _title_author_hash(title: str, author: str) -> str:
 def get_conn(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
+    try:
+        conn.executescript(SCHEMA)
+    except sqlite3.Error as e:
+        conn.close()
+        raise RuntimeError(f"Failed to initialize DB at {db_path}") from e
     return conn
 
 
@@ -70,33 +77,37 @@ def log_book(
     key = isbn13 or _title_author_hash(title, author)
     today = date.today().isoformat()
 
-    existing = conn.execute("SELECT 1 FROM seen_books WHERE isbn13 = ?", (key,)).fetchone()
-    if existing:
-        conn.execute(
-            """UPDATE seen_books
-               SET last_checked_date = ?, last_rating = ?, last_rating_count = ?,
-                   passed_filter = ?, genre_tags = COALESCE(?, genre_tags)
-             WHERE isbn13 = ?""",
-            (today, rating, rating_count, passed_filter, genre_tags, key),
-        )
-    else:
-        conn.execute(
-            """INSERT INTO seen_books
-               (isbn13, goodreads_id, title, author, pub_date,
-                first_seen_date, last_checked_date,
-                first_rating, first_rating_count,
-                last_rating, last_rating_count,
-                passed_filter, genre_tags, goodreads_url, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                key, goodreads_id, title, author, pub_date,
-                today, today,
-                rating, rating_count,
-                rating, rating_count,
-                passed_filter, genre_tags, goodreads_url, notes,
-            ),
-        )
-    conn.commit()
+    try:
+        existing = conn.execute("SELECT 1 FROM seen_books WHERE isbn13 = ?", (key,)).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE seen_books
+                   SET last_checked_date = ?, last_rating = ?, last_rating_count = ?,
+                       passed_filter = ?, genre_tags = COALESCE(?, genre_tags)
+                 WHERE isbn13 = ?""",
+                (today, rating, rating_count, passed_filter, genre_tags, key),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO seen_books
+                   (isbn13, goodreads_id, title, author, pub_date,
+                    first_seen_date, last_checked_date,
+                    first_rating, first_rating_count,
+                    last_rating, last_rating_count,
+                    passed_filter, genre_tags, goodreads_url, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    key, goodreads_id, title, author, pub_date,
+                    today, today,
+                    rating, rating_count,
+                    rating, rating_count,
+                    passed_filter, genre_tags, goodreads_url, notes,
+                ),
+            )
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        logger.error("Failed to log book %r (key=%s): %s", title, key, e)
 
 
 def get_books_for_recheck(conn: sqlite3.Connection, days_since_last_check: int = 90) -> list[dict]:

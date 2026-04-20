@@ -5,6 +5,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,6 +26,8 @@ REQUEST_DELAY = 2.0  # seconds between requests to avoid rate-limiting
 GOODREADS_NEW_RELEASES_URL = "https://www.goodreads.com/book/popular_by_date/{year}/{month}"
 GOODREADS_SEARCH_URL = "https://www.goodreads.com/search"
 
+ALLOWED_HOSTS = {"www.goodreads.com", "goodreads.com"}
+
 
 @dataclass
 class Book:
@@ -39,10 +42,22 @@ class Book:
     genre_tags: list[str] = field(default_factory=list)
 
 
+def _is_allowed_url(url: str) -> bool:
+    """Validate that the URL points to an allowed Goodreads domain."""
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and parsed.netloc in ALLOWED_HOSTS
+
+
 def _get(url: str, params: dict | None = None) -> BeautifulSoup | None:
     """Fetch a URL and return parsed soup, or None on failure."""
+    if not _is_allowed_url(url):
+        logger.warning("Refusing to fetch non-Goodreads URL: %s", url)
+        return None
     try:
         resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        if resp.status_code == 429:
+            logger.warning("Rate-limited (429) fetching %s", url)
+            return None
         resp.raise_for_status()
         return BeautifulSoup(resp.text, "lxml")
     except requests.RequestException as e:
@@ -57,16 +72,14 @@ def fetch_new_releases(window_days: int = 90) -> list[Book]:
     seen_urls: set[str] = set()
 
     # Cover each month in the window
-    months_to_check: list[tuple[int, int]] = []
+    months_to_check: set[tuple[int, int]] = set()
     d = today
     cutoff = today - timedelta(days=window_days)
     while d >= cutoff:
-        ym = (d.year, d.month)
-        if ym not in months_to_check:
-            months_to_check.append(ym)
+        months_to_check.add((d.year, d.month))
         d -= timedelta(days=28)
 
-    for year, month in months_to_check:
+    for year, month in sorted(months_to_check):
         url = GOODREADS_NEW_RELEASES_URL.format(year=year, month=month)
         logger.info("Fetching new releases: %s", url)
         soup = _get(url)
@@ -112,6 +125,7 @@ def enrich_book(book: Book) -> Book:
 
     soup = _get(book.goodreads_url)
     if not soup:
+        logger.warning("Enrichment failed for %r (%s) — skipping", book.title, book.goodreads_url)
         return book
 
     # Author
@@ -130,10 +144,11 @@ def enrich_book(book: Book) -> Book:
         "div[class*='RatingStatistics'] div[class*='rating']"
     )
     if rating_el:
+        raw = rating_el.get_text(strip=True)
         try:
-            book.rating = float(rating_el.get_text(strip=True))
+            book.rating = float(raw)
         except ValueError:
-            pass
+            logger.debug("Could not parse rating %r for %s", raw, book.goodreads_url)
 
     # Rating count
     count_el = soup.select_one(
@@ -155,20 +170,18 @@ def enrich_book(book: Book) -> Book:
     )
     if pub_el:
         pub_text = pub_el.get_text(strip=True)
-        # Try to extract a date like "Published January 15, 2026"
         date_match = re.search(
             r"(?:Published|First published)\s+"
             r"(\w+\s+\d{1,2},?\s+\d{4})",
             pub_text,
         )
         if date_match:
+            raw_date = date_match.group(1).replace(",", "")
             try:
-                parsed = datetime.strptime(
-                    date_match.group(1).replace(",", ""), "%B %d %Y"
-                )
+                parsed = datetime.strptime(raw_date, "%B %d %Y")
                 book.pub_date = parsed.strftime("%Y-%m-%d")
             except ValueError:
-                pass
+                logger.debug("Could not parse pub date %r for %s", raw_date, book.goodreads_url)
 
     # Genre tags (top shelves)
     genre_els = soup.select(
