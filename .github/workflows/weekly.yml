@@ -1,0 +1,60 @@
+name: Weekly Book Filter
+
+on:
+  schedule:
+    # Every Sunday at 6 PM Central (23:00 UTC, accounting for CDT)
+    - cron: "0 23 * * 0"
+  workflow_dispatch: # Allow manual runs
+
+jobs:
+  filter-books:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download previous database
+        uses: actions/download-artifact@v4
+        with:
+          name: seen-books-db
+          path: .
+        continue-on-error: true  # First run won't have an artifact
+
+      - name: Run book filter
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: python main.py
+
+      - name: Upload database for next run
+        uses: actions/upload-artifact@v4
+        with:
+          name: seen-books-db
+          path: seen_books.db
+          retention-days: 400
+          overwrite: true
+
+      - name: Upload shortlist
+        uses: actions/upload-artifact@v4
+        with:
+          name: shortlist-${{ github.run_number }}
+          path: shortlists/
+          retention-days: 90
+
+      - name: Commit shortlist to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add shortlists/
+          git diff --cached --quiet || git commit -m "Add shortlist for $(date +%Y-%m-%d)"
+          git push
