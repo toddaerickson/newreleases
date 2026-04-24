@@ -84,6 +84,18 @@ def run(
         logger.info("%d books passed the filter (rating >= %.1f, count >= %d)",
                     len(passed), min_rating, min_rating_count)
 
+        # --- Phase 4a: Enrich passing books missing genres/pub_date ---
+        # Apollo JSON from listing pages provides rating/author but not genres
+        # or pub_date. Fetch detail pages only for books that passed the filter.
+        needs_detail = [b for b in passed if not b.genre_tags or not b.pub_date]
+        if needs_detail:
+            logger.info("Fetching detail pages for %d passing books (genres/pub date)...", len(needs_detail))
+            for book in needs_detail:
+                try:
+                    enrich_book(book, force=True)
+                except Exception as e:
+                    logger.error("Detail enrichment crashed for %r: %s", book.title, e)
+
         # --- Phase 4b: Re-check previously failed books (quarterly) ---
         if recheck:
             recheck_candidates = get_books_for_recheck(conn)
