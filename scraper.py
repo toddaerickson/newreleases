@@ -1,5 +1,6 @@
 """Goodreads scraping for new releases and book details."""
 
+import json
 import logging
 import random
 import re
@@ -123,14 +124,143 @@ def _polite_sleep() -> None:
     time.sleep(REQUEST_DELAY + random.uniform(0, 1.0))
 
 
+def _extract_books_from_apollo(soup: BeautifulSoup) -> list[Book]:
+    """Extract books from Goodreads' embedded Apollo/Next.js JSON state.
+
+    Goodreads uses React with Apollo GraphQL. The full book data (title,
+    author, rating, URL) is embedded in a <script id="__NEXT_DATA__"> tag
+    as JSON. This is far more reliable than CSS selectors on JS-rendered HTML.
+    """
+    script_tag = soup.select_one("script#__NEXT_DATA__")
+    if not script_tag or not script_tag.string:
+        return []
+
+    try:
+        data = json.loads(script_tag.string)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Failed to parse __NEXT_DATA__ JSON")
+        return []
+
+    apollo = data.get("props", {}).get("pageProps", {}).get("apolloState", {})
+    if not apollo:
+        return []
+
+    # Index Contributor entities by their ref ID
+    contributors: dict[str, str] = {}
+    for key, val in apollo.items():
+        if key.startswith("Contributor:") and isinstance(val, dict):
+            contributors[key] = val.get("name", "")
+
+    # Index Work entities (contain rating stats) by their ref ID
+    works: dict[str, dict] = {}
+    for key, val in apollo.items():
+        if key.startswith("Work:") and isinstance(val, dict):
+            works[key] = val.get("stats", {})
+
+    # Extract Book entities
+    books: list[Book] = []
+    for key, val in apollo.items():
+        if not key.startswith("Book:") or not isinstance(val, dict):
+            continue
+
+        title = val.get("title") or val.get("titleComplete", "")
+        if not title:
+            continue
+
+        web_url = val.get("webUrl", "")
+        legacy_id = val.get("legacyId")
+        gr_id = str(legacy_id) if legacy_id else None
+
+        # Resolve author from contributor ref
+        author = ""
+        contrib_edge = val.get("primaryContributorEdge", {})
+        if isinstance(contrib_edge, dict):
+            contrib_node = contrib_edge.get("node", {})
+            if isinstance(contrib_node, dict):
+                ref = contrib_node.get("__ref", "")
+                author = contributors.get(ref, "")
+
+        # Resolve rating from work ref
+        rating = None
+        rating_count = None
+        work_ref = val.get("work", {})
+        if isinstance(work_ref, dict):
+            ref = work_ref.get("__ref", "")
+            stats = works.get(ref, {})
+            if isinstance(stats, dict):
+                avg = stats.get("averageRating")
+                cnt = stats.get("ratingsCount")
+                if avg is not None:
+                    rating = float(avg)
+                if cnt is not None:
+                    rating_count = int(cnt)
+
+        books.append(Book(
+            title=title,
+            author=author,
+            goodreads_id=gr_id,
+            goodreads_url=web_url,
+            rating=rating,
+            rating_count=rating_count,
+        ))
+
+    return books
+
+
+def _extract_books_from_html(soup: BeautifulSoup) -> list[Book]:
+    """Fallback: extract books from HTML anchors (old Goodreads layout)."""
+    books: list[Book] = []
+    seen_urls: set[str] = set()
+
+    for anchor in soup.select("a.bookTitle, a[class*='BookCard'], a[href*='/book/show/']"):
+        href = anchor.get("href", "")
+        if not isinstance(href, str):
+            continue
+        if "/book/show/" not in href:
+            continue
+        full_url = f"https://www.goodreads.com{href}" if href.startswith("/") else href
+        full_url = full_url.split("?")[0]
+        if full_url in seen_urls:
+            continue
+        seen_urls.add(full_url)
+
+        # Try anchor text, then image alt text as title fallback
+        title_text = anchor.get_text(strip=True)
+        if not title_text:
+            img = anchor.select_one("img[alt]")
+            if img:
+                alt = img.get("alt", "")
+                if isinstance(alt, str):
+                    title_text = alt.replace(" Book Cover", "").strip()
+        if not title_text:
+            continue
+
+        gr_id_match = re.search(r"/book/show/(\d+)", full_url)
+        gr_id = gr_id_match.group(1) if gr_id_match else None
+
+        books.append(Book(
+            title=title_text,
+            author="",  # filled during enrichment
+            goodreads_id=gr_id,
+            goodreads_url=full_url,
+        ))
+
+    return books
+
+
 def fetch_new_releases(window_days: int = 90) -> list[Book]:
-    """Scrape Goodreads popular-by-date pages for the trailing window."""
+    """Scrape Goodreads popular-by-date pages for the trailing window.
+
+    Primary strategy: parse the embedded Apollo/Next.js JSON state, which
+    contains title, author, rating, and URL for all books on the page.
+    Fallback: extract from HTML anchors if JSON is unavailable.
+    """
     books: list[Book] = []
     today = date.today()
     seen_urls: set[str] = set()
     cutoff = today - timedelta(days=window_days)
 
-    # Cover each calendar month in the window (not 28-day steps)
+    # Cover each calendar month in the window
     months_to_check: set[tuple[int, int]] = set()
     year, month = today.year, today.month
     while date(year, month, 1) >= date(cutoff.year, cutoff.month, 1):
@@ -147,38 +277,22 @@ def fetch_new_releases(window_days: int = 90) -> list[Book]:
         if not soup:
             continue
 
-        page_books_found = 0
-        for anchor in soup.select("a.bookTitle, a[class*='BookCard'] a, a[href*='/book/show/']"):
-            href = anchor.get("href", "")
-            if not isinstance(href, str):
-                continue
-            if "/book/show/" not in href:
-                continue
-            full_url = f"https://www.goodreads.com{href}" if href.startswith("/") else href
-            # Normalize URL (strip query params)
-            full_url = full_url.split("?")[0]
-            if full_url in seen_urls:
-                continue
-            seen_urls.add(full_url)
+        # Try Apollo JSON first (reliable), then fall back to HTML selectors
+        page_books = _extract_books_from_apollo(soup)
+        if page_books:
+            logger.info("Extracted %d books from Apollo JSON on %s", len(page_books), url)
+        else:
+            page_books = _extract_books_from_html(soup)
+            if page_books:
+                logger.info("Extracted %d books from HTML on %s", len(page_books), url)
+            else:
+                logger.warning("Zero books found on %s — page may be blocked or layout changed", url)
 
-            title_text = anchor.get_text(strip=True)
-            if not title_text:
-                continue
-
-            # Extract goodreads ID from URL
-            gr_id_match = re.search(r"/book/show/(\d+)", full_url)
-            gr_id = gr_id_match.group(1) if gr_id_match else None
-
-            books.append(Book(
-                title=title_text,
-                author="",  # filled during enrichment
-                goodreads_id=gr_id,
-                goodreads_url=full_url,
-            ))
-            page_books_found += 1
-
-        if page_books_found == 0:
-            logger.warning("Zero books found on %s — selectors may be broken or page is JS-rendered", url)
+        for book in page_books:
+            book_url = book.goodreads_url
+            if book_url and book_url not in seen_urls:
+                seen_urls.add(book_url)
+                books.append(book)
 
         _polite_sleep()
 
@@ -186,9 +300,93 @@ def fetch_new_releases(window_days: int = 90) -> list[Book]:
     return books
 
 
-def enrich_book(book: Book) -> Book:
-    """Fetch the book's Goodreads page and populate rating, author, genres."""
+def _enrich_from_apollo(soup: BeautifulSoup, book: Book) -> bool:
+    """Try to enrich book from Apollo JSON on the detail page. Returns True if successful."""
+    script_tag = soup.select_one("script#__NEXT_DATA__")
+    if not script_tag or not script_tag.string:
+        return False
+
+    try:
+        data = json.loads(script_tag.string)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+    apollo = data.get("props", {}).get("pageProps", {}).get("apolloState", {})
+    if not apollo:
+        return False
+
+    # Find the Book entity matching our ID
+    target_id = book.goodreads_id
+    book_data = None
+    for key, val in apollo.items():
+        if not key.startswith("Book:") or not isinstance(val, dict):
+            continue
+        if str(val.get("legacyId")) == target_id:
+            book_data = val
+            break
+
+    if not book_data:
+        # If only one Book entity, use it
+        book_entries = {k: v for k, v in apollo.items() if k.startswith("Book:") and isinstance(v, dict)}
+        if len(book_entries) == 1:
+            book_data = next(iter(book_entries.values()))
+
+    if not book_data:
+        return False
+
+    # Title
+    title = book_data.get("titleComplete") or book_data.get("title")
+    if title:
+        book.title = title
+
+    # Author
+    contrib_edge = book_data.get("primaryContributorEdge", {})
+    if isinstance(contrib_edge, dict):
+        contrib_node = contrib_edge.get("node", {})
+        if isinstance(contrib_node, dict):
+            ref = contrib_node.get("__ref", "")
+            contrib = apollo.get(ref, {})
+            if isinstance(contrib, dict) and contrib.get("name"):
+                book.author = contrib["name"]
+
+    # Rating from Work stats
+    work_ref = book_data.get("work", {})
+    if isinstance(work_ref, dict):
+        ref = work_ref.get("__ref", "")
+        work = apollo.get(ref, {})
+        if isinstance(work, dict):
+            stats = work.get("stats", {})
+            if isinstance(stats, dict):
+                avg = stats.get("averageRating")
+                cnt = stats.get("ratingsCount")
+                if avg is not None:
+                    book.rating = float(avg)
+                if cnt is not None:
+                    book.rating_count = int(cnt)
+
+    # Genre tags from BookGenre entities
+    for key, val in apollo.items():
+        if key.startswith("Genre:") and isinstance(val, dict):
+            name = val.get("name")
+            if name and name not in book.genre_tags and len(book.genre_tags) < 8:
+                book.genre_tags.append(name)
+
+    return book.author != "" or book.rating is not None
+
+
+def enrich_book(book: Book, force: bool = False) -> Book:
+    """Fetch the book's Goodreads page and populate rating, author, genres.
+
+    Primary strategy: parse Apollo JSON state from the detail page.
+    Fallback: extract from HTML with CSS selectors.
+    Set force=True to fetch detail page even if basic data exists (for genres/pub_date).
+    """
     if not book.goodreads_url:
+        return book
+
+    # Skip enrichment if we already have rating data from the listing page
+    if not force and book.rating is not None and book.rating_count is not None and book.author:
+        logger.debug("Skipping enrichment for %r — already have data from listing", book.title)
         return book
 
     soup = _get(book.goodreads_url)
@@ -196,94 +394,101 @@ def enrich_book(book: Book) -> Book:
         logger.warning("Enrichment failed for %r (%s) — skipping", book.title, book.goodreads_url)
         return book
 
-    # Author
-    author_el = soup.select_one(
-        "span.ContributorLink__name, "
-        "a.authorName span, "
-        "span[data-testid='name']"
-    )
-    if author_el:
-        book.author = author_el.get_text(strip=True)
+    # Try Apollo JSON first for rating/author
+    if _enrich_from_apollo(soup, book):
+        logger.debug("Enriched %r from Apollo JSON", book.title)
 
-    # Rating
-    rating_el = soup.select_one(
-        "div.RatingStatistics__rating, "
-        "span[itemprop='ratingValue'], "
-        "div[class*='RatingStatistics'] div[class*='rating']"
-    )
-    if rating_el:
-        raw = rating_el.get_text(strip=True)
-        # Strip non-numeric content except decimal point
-        cleaned = re.sub(r"[^\d.]", "", raw)
-        try:
-            book.rating = float(cleaned)
-        except ValueError:
-            logger.debug("Could not parse rating %r for %s", raw, book.goodreads_url)
+    # Always try CSS selectors for fields Apollo doesn't provide
+    # (genres, pub_date, and as fallback for rating/author)
+    if not book.genre_tags or not book.pub_date or not book.author or book.rating is None:
+        _enrich_from_html(soup, book)
 
-    # Rating count
-    count_el = soup.select_one(
-        "span[data-testid='ratingsCount'], "
-        "meta[itemprop='ratingCount'], "
-        "span[class*='ratingsCount']"
-    )
-    if count_el:
-        raw_content = count_el.get("content")
-        count_text = (raw_content if isinstance(raw_content, str) else None) or count_el.get_text(strip=True)
-        count_text = re.sub(r"[^\d]", "", count_text)
-        if count_text:
-            book.rating_count = int(count_text)
-
-    # Publication date
-    pub_el = soup.select_one(
-        "p[data-testid='publicationInfo'], "
-        "div.FeaturedDetails p, "
-        "div#details div.row"
-    )
-    if pub_el:
-        pub_text = pub_el.get_text(strip=True)
-        date_match = re.search(
-            r"(?:Published|First published|Expected publication)[:\s]+"
-            r"(\w+\s+\d{1,2},?\s+\d{4})",
-            pub_text,
-        )
-        if date_match:
-            raw_date = date_match.group(1).replace(",", "")
-            try:
-                parsed = datetime.strptime(raw_date, "%B %d %Y")
-                book.pub_date = parsed.strftime("%Y-%m-%d")
-            except ValueError:
-                logger.debug("Could not parse pub date %r for %s", raw_date, book.goodreads_url)
-
-    # Genre tags (top shelves)
-    genre_els = soup.select(
-        "span.BookPageMetadataSection__genreButton a, "
-        "a.actionLinkLite.bookPageGenreLink, "
-        "span[class*='GenreButton'] a"
-    )
-    book.genre_tags = [g.get_text(strip=True) for g in genre_els[:8]]
-
-    # ISBN
+    # ISBN (only available in HTML meta tags)
     isbn_el = soup.select_one("meta[property='books:isbn']")
     if isbn_el:
         val = isbn_el.get("content")
         if isinstance(val, str):
             book.isbn13 = val
 
-    # Title refinement — use the page's canonical title
-    title_el = soup.select_one(
-        "h1[data-testid='bookTitle'], "
-        "h1#bookTitle, "
-        "h1.Text__title1"
-    )
-    if title_el:
-        book.title = title_el.get_text(strip=True)
-
-    # Warn if enrichment produced no useful data (selector breakage signal)
+    # Warn if enrichment produced no useful data
     if book.author == "" and book.rating is None:
         logger.warning("Enrichment returned no author or rating for %r — selectors may be broken", book.title)
 
     _polite_sleep()
     return book
+
+
+def _enrich_from_html(soup: BeautifulSoup, book: Book) -> None:
+    """Enrich book from HTML CSS selectors. Only fills missing fields."""
+    # Author (only if missing)
+    if not book.author:
+        author_el = soup.select_one(
+            "span.ContributorLink__name, "
+            "a.authorName span, "
+            "span[data-testid='name']"
+        )
+        if author_el:
+            book.author = author_el.get_text(strip=True)
+
+    # Rating (only if missing)
+    if book.rating is None:
+        rating_el = soup.select_one(
+            "div.RatingStatistics__rating, "
+            "span[itemprop='ratingValue'], "
+            "div[class*='RatingStatistics'] div[class*='rating']"
+        )
+        if rating_el:
+            raw = rating_el.get_text(strip=True)
+            cleaned = re.sub(r"[^\d.]", "", raw)
+            try:
+                book.rating = float(cleaned)
+            except ValueError:
+                logger.debug("Could not parse rating %r for %s", raw, book.goodreads_url)
+
+    # Rating count (only if missing)
+    if book.rating_count is None:
+        count_el = soup.select_one(
+            "span[data-testid='ratingsCount'], "
+            "meta[itemprop='ratingCount'], "
+            "span[class*='ratingsCount']"
+        )
+        if count_el:
+            raw_content = count_el.get("content")
+            count_text = (raw_content if isinstance(raw_content, str) else None) or count_el.get_text(strip=True)
+            count_text = re.sub(r"[^\d]", "", count_text)
+            if count_text:
+                book.rating_count = int(count_text)
+
+    # Publication date (only if missing)
+    if not book.pub_date:
+        pub_el = soup.select_one(
+            "p[data-testid='publicationInfo'], "
+            "div.FeaturedDetails p, "
+            "div#details div.row"
+        )
+        if pub_el:
+            pub_text = pub_el.get_text(strip=True)
+            date_match = re.search(
+                r"(?:Published|First published|Expected publication)[:\s]+"
+                r"(\w+\s+\d{1,2},?\s+\d{4})",
+                pub_text,
+            )
+            if date_match:
+                raw_date = date_match.group(1).replace(",", "")
+                try:
+                    parsed = datetime.strptime(raw_date, "%B %d %Y")
+                    book.pub_date = parsed.strftime("%Y-%m-%d")
+                except ValueError:
+                    logger.debug("Could not parse pub date %r for %s", raw_date, book.goodreads_url)
+
+    # Genre tags (only if missing)
+    if not book.genre_tags:
+        genre_els = soup.select(
+            "span.BookPageMetadataSection__genreButton a, "
+            "a.actionLinkLite.bookPageGenreLink, "
+            "span[class*='GenreButton'] a"
+        )
+        book.genre_tags = [g.get_text(strip=True) for g in genre_els[:8]]
 
 
 def search_and_enrich(title: str, author: str) -> Book | None:
