@@ -44,7 +44,13 @@ def get_conn(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        conn.executescript(SCHEMA)
+        # Use individual execute() calls instead of executescript() to avoid
+        # implicit COMMIT behavior that executescript() triggers.
+        for statement in SCHEMA.split(";"):
+            statement = statement.strip()
+            if statement:
+                conn.execute(statement)
+        conn.commit()
     except sqlite3.Error as e:
         conn.close()
         raise RuntimeError(f"Failed to initialize DB at {db_path}") from e

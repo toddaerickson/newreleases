@@ -39,6 +39,7 @@ def run(
         sys.exit(1)
 
     conn = get_conn()
+    passed: list[Book] = []  # Initialize before try to avoid UnboundLocalError
     try:
         today = date.today()
 
@@ -62,7 +63,6 @@ def run(
                 continue
 
         # --- Phase 4: Filter ---
-        passed = []
         for book in enriched:
             hit = passes_filter(book, min_rating, min_rating_count)
             log_book(
@@ -103,6 +103,8 @@ def run(
                         title=b.title,
                         author=b.author,
                         isbn13=b.isbn13,
+                        goodreads_id=b.goodreads_id,
+                        pub_date=b.pub_date,
                         rating=b.rating,
                         rating_count=b.rating_count,
                         passed_filter=hit,
@@ -117,7 +119,7 @@ def run(
         logger.info("Shortlist: %s", shortlist_path)
 
         if passed and not skip_email:
-            if not send_email(passed, recipient, today):
+            if not send_email(passed, recipient, today, min_rating=min_rating):
                 logger.warning("Email delivery failed for %d books — check SMTP config.", len(passed))
         elif not passed:
             logger.info("No books passed the filter — no email sent.")
