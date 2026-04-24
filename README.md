@@ -2,9 +2,47 @@
 
 Automated weekly pipeline that scrapes Goodreads for new book releases, filters by rating, deduplicates against a persistent log, and delivers a curated shortlist via email and markdown.
 
+## Quick start
+
+```bash
+# 1. Clone and install
+git clone https://github.com/toddaerickson/newreleases.git
+cd newreleases
+pip install -r requirements.txt
+
+# 2. Run (markdown only, no email)
+python main.py --skip-email --recipient you@example.com
+
+# 3. Run with email delivery
+export BOOK_RECIPIENT='you@example.com'
+export SMTP_HOST=smtp.gmail.com
+export SMTP_PORT=587
+export SMTP_USER=sender@gmail.com
+export SMTP_PASS='your-gmail-app-password'
+python main.py
+```
+
+The tool scans Goodreads for books published in the last 90 days, filters for ratings >= 4.3 with at least 500 ratings, and outputs a markdown file to `shortlists/`. If email is configured, it sends the shortlist as a digest. Books are logged to a local SQLite database so they only appear once.
+
+### Common recipes
+
+```bash
+# Lower the bar — catch more books earlier
+python main.py --min-rating 4.0 --min-count 200 --skip-email --recipient you@example.com
+
+# Wider time window (6 months)
+python main.py --window 180 --skip-email --recipient you@example.com
+
+# Narrow window (last 30 days only)
+python main.py --window 30 --skip-email --recipient you@example.com
+
+# Re-check books that previously failed the filter (ratings may have improved)
+python main.py --recheck --skip-email --recipient you@example.com
+```
+
 ## How it works
 
-```
+```text
 Goodreads new releases (trailing 90 days)
         |
         v
@@ -98,7 +136,7 @@ python main.py --recheck --skip-email --recipient you@example.com
 
 ## Project structure
 
-```
+```text
 newreleases/
 ├── main.py              # Orchestrator — phases 1-5, CLI entry point
 ├── scraper.py           # Goodreads scraping (new releases + book detail pages)
@@ -114,13 +152,13 @@ newreleases/
 
 ### Module details
 
-**`scraper.py`** — Fetches Goodreads `popular_by_date` pages for each month in the trailing window. Extracts book links, then enriches each with a detail-page fetch to get rating, rating count, author, publication date, genre tags, and ISBN. Rate-limited to 2 seconds between requests. Validates all URLs against an allowlist before fetching.
+**`scraper.py`** — Fetches Goodreads `popular_by_date` pages for each month in the trailing window. Extracts book links, then enriches each with a detail-page fetch to get rating, rating count, author, publication date, genre tags, and ISBN. Uses a persistent session with automatic retry/backoff for 429 and 5xx responses. Requests are jittered (2-3 seconds between fetches) to avoid bot fingerprinting. Detects Cloudflare challenge pages and logs errors instead of parsing garbage HTML. Validates all URLs against an allowlist before fetching.
 
-**`db.py`** — SQLite database with a `seen_books` table. Primary key is ISBN-13 when available, falling back to a truncated SHA-256 hash of normalized title+author. Tracks both first-seen and last-checked ratings so books can be re-evaluated as ratings mature. Handles insert/update with rollback on failure.
+**`db.py`** — SQLite database with a `seen_books` table. Primary key is ISBN-13 when available, falling back to a truncated SHA-256 hash of normalized title+author. Tracks both first-seen and last-checked ratings so books can be re-evaluated as ratings mature. Schema initialization uses explicit transactions (avoids `executescript()` implicit commit). Handles insert/update with rollback on failure.
 
 **`filters.py`** — Single function `passes_filter()` that checks rating and rating count against caller-provided thresholds. No defaults — the caller (main.py) owns the policy values.
 
-**`notify.py`** — Writes markdown shortlists to `shortlists/shortlist_YYYY-MM-DD.md`. Sends plaintext email via SMTP with TLS (SSL context enforced). SMTP config comes entirely from environment variables. Specific exception handling for auth failures vs. network errors vs. SMTP protocol errors.
+**`notify.py`** — Writes markdown shortlists to `shortlists/shortlist_YYYY-MM-DD.md`. Sends plaintext email via SMTP with STARTTLS (port 587, SSL context enforced). Includes proper `Date` and `Message-ID` headers. Validates recipients against header injection. Rejects port 465 (requires SMTP_SSL, not supported). SMTP config comes entirely from environment variables. Specific exception handling for auth failures vs. network errors vs. SMTP protocol errors.
 
 **`main.py`** — Orchestrates the five-phase pipeline: fetch, dedup, enrich, filter, output. All configuration via CLI args or env vars — no hardcoded values. Connection cleanup guaranteed via try/finally.
 
@@ -176,7 +214,7 @@ The `first_*` and `last_*` rating fields allow tracking how a book's rating evol
 
 ### Email
 
-Same content in plaintext, sent with subject line:
+Same content in plaintext, sent with subject line (threshold reflects `--min-rating`):
 `[Books] 2 new candidates over 4.3 — 2026-04-19`
 
 Only sent when at least one book passes the filter.
@@ -190,15 +228,15 @@ Only sent when at least one book passes the filter.
 
 ## Dependencies
 
-- [requests](https://pypi.org/project/requests/) — HTTP client
-- [beautifulsoup4](https://pypi.org/project/beautifulsoup4/) — HTML parsing
-- [lxml](https://pypi.org/project/lxml/) — Fast HTML parser backend for BeautifulSoup
+- [requests](https://pypi.org/project/requests/) >=2.31, <3 — HTTP client (with urllib3 retry support)
+- [beautifulsoup4](https://pypi.org/project/beautifulsoup4/) >=4.12, <5 — HTML parsing
+- [lxml](https://pypi.org/project/lxml/) >=5.0, <6.1 — Fast HTML parser backend for BeautifulSoup
 - Python stdlib: `sqlite3`, `smtplib`, `ssl`, `argparse`, `logging`
 
 ## Known limitations
 
-- **Goodreads scraping is fragile.** If Goodreads changes their HTML structure, the CSS selectors in `scraper.py` will need updating. The scraper logs warnings on parse failures rather than crashing.
-- **Rate limiting.** Goodreads may return 429 responses under heavy load. The scraper logs these and skips the affected pages. The 2-second delay between requests keeps volume low (~200 fetches max per run).
+- **Goodreads scraping is fragile.** If Goodreads changes their HTML structure, the CSS selectors in `scraper.py` will need updating. The scraper logs warnings on parse failures rather than crashing. Cloudflare bot challenges are detected and logged, but cannot be bypassed.
+- **Rate limiting.** Goodreads may return 429 responses under heavy load. The scraper retries automatically with exponential backoff (3s, 6s, 12s) for 429 and 5xx responses. Jittered delays (2-3 seconds) between requests keep volume low (~200 fetches max per run).
 - **No pagination.** The new-releases pages are scraped as single pages. If Goodreads paginates them, only the first page is captured.
 - **Translated works and re-releases** may show recent publication dates but aren't truly "new." These can slip through the filter.
 - **Database persistence in CI** relies on GitHub Actions artifacts (400-day retention). If the artifact expires, the dedup log resets and previously-seen books may reappear.

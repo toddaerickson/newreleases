@@ -1,6 +1,7 @@
 """Goodreads scraping for new releases and book details."""
 
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -8,6 +9,8 @@ from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -18,15 +21,28 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.goodreads.com/",
+    "Connection": "keep-alive",
 }
 
-REQUEST_DELAY = 2.0  # seconds between requests to avoid rate-limiting
+REQUEST_DELAY = 2.0  # base seconds between requests to avoid rate-limiting
 
 GOODREADS_NEW_RELEASES_URL = "https://www.goodreads.com/book/popular_by_date/{year}/{month}"
 GOODREADS_SEARCH_URL = "https://www.goodreads.com/search"
 
 ALLOWED_HOSTS = {"www.goodreads.com", "goodreads.com"}
+
+# Cloudflare/bot challenge signatures in page titles or body
+_CHALLENGE_SIGNATURES = [
+    "just a moment",
+    "access denied",
+    "attention required",
+    "checking your browser",
+    "enable javascript",
+]
 
 
 @dataclass
@@ -42,27 +58,69 @@ class Book:
     genre_tags: list[str] = field(default_factory=list)
 
 
+def _build_session() -> requests.Session:
+    """Build a requests.Session with retry/backoff for transient errors."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    retry = Retry(
+        total=3,
+        backoff_factor=3,        # 3s, 6s, 12s
+        status_forcelist=[429, 500, 502, 503, 504],
+        respect_retry_after_header=True,
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    return session
+
+
+# Module-level session for connection pooling and cookie persistence
+_session = _build_session()
+
+
 def _is_allowed_url(url: str) -> bool:
     """Validate that the URL points to an allowed Goodreads domain."""
     parsed = urlparse(url)
     return parsed.scheme == "https" and parsed.netloc in ALLOWED_HOSTS
 
 
+def _is_challenge_page(soup: BeautifulSoup) -> bool:
+    """Detect Cloudflare or bot challenge pages."""
+    title_tag = soup.find("title")
+    if title_tag:
+        title_text = title_tag.get_text(strip=True).lower()
+        for sig in _CHALLENGE_SIGNATURES:
+            if sig in title_text:
+                return True
+    return False
+
+
 def _get(url: str, params: dict | None = None) -> BeautifulSoup | None:
-    """Fetch a URL and return parsed soup, or None on failure."""
+    """Fetch a URL and return parsed soup, or None on failure.
+
+    Uses a shared session with automatic retry/backoff for 429 and 5xx.
+    """
     if not _is_allowed_url(url):
         logger.warning("Refusing to fetch non-Goodreads URL: %s", url)
         return None
     try:
-        resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
-        if resp.status_code == 429:
-            logger.warning("Rate-limited (429) fetching %s", url)
-            return None
+        resp = _session.get(url, params=params, timeout=(5, 15))
         resp.raise_for_status()
-        return BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        if _is_challenge_page(soup):
+            logger.error("Cloudflare/bot challenge detected at %s — scraper may be blocked", url)
+            return None
+
+        return soup
     except requests.RequestException as e:
         logger.warning("Failed to fetch %s: %s", url, e)
         return None
+
+
+def _polite_sleep() -> None:
+    """Sleep with jitter to avoid bot fingerprinting."""
+    time.sleep(REQUEST_DELAY + random.uniform(0, 1.0))
 
 
 def fetch_new_releases(window_days: int = 90) -> list[Book]:
@@ -70,24 +128,30 @@ def fetch_new_releases(window_days: int = 90) -> list[Book]:
     books: list[Book] = []
     today = date.today()
     seen_urls: set[str] = set()
-
-    # Cover each month in the window
-    months_to_check: set[tuple[int, int]] = set()
-    d = today
     cutoff = today - timedelta(days=window_days)
-    while d >= cutoff:
-        months_to_check.add((d.year, d.month))
-        d -= timedelta(days=28)
 
-    for year, month in sorted(months_to_check):
-        url = GOODREADS_NEW_RELEASES_URL.format(year=year, month=month)
+    # Cover each calendar month in the window (not 28-day steps)
+    months_to_check: set[tuple[int, int]] = set()
+    year, month = today.year, today.month
+    while date(year, month, 1) >= date(cutoff.year, cutoff.month, 1):
+        months_to_check.add((year, month))
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+
+    for yr, mo in sorted(months_to_check):
+        url = GOODREADS_NEW_RELEASES_URL.format(year=yr, month=mo)
         logger.info("Fetching new releases: %s", url)
         soup = _get(url)
         if not soup:
             continue
 
+        page_books_found = 0
         for anchor in soup.select("a.bookTitle, a[class*='BookCard'] a, a[href*='/book/show/']"):
             href = anchor.get("href", "")
+            if not isinstance(href, str):
+                continue
             if "/book/show/" not in href:
                 continue
             full_url = f"https://www.goodreads.com{href}" if href.startswith("/") else href
@@ -111,8 +175,12 @@ def fetch_new_releases(window_days: int = 90) -> list[Book]:
                 goodreads_id=gr_id,
                 goodreads_url=full_url,
             ))
+            page_books_found += 1
 
-        time.sleep(REQUEST_DELAY)
+        if page_books_found == 0:
+            logger.warning("Zero books found on %s — selectors may be broken or page is JS-rendered", url)
+
+        _polite_sleep()
 
     logger.info("Found %d candidate books from new-release pages", len(books))
     return books
@@ -145,8 +213,10 @@ def enrich_book(book: Book) -> Book:
     )
     if rating_el:
         raw = rating_el.get_text(strip=True)
+        # Strip non-numeric content except decimal point
+        cleaned = re.sub(r"[^\d.]", "", raw)
         try:
-            book.rating = float(raw)
+            book.rating = float(cleaned)
         except ValueError:
             logger.debug("Could not parse rating %r for %s", raw, book.goodreads_url)
 
@@ -157,7 +227,8 @@ def enrich_book(book: Book) -> Book:
         "span[class*='ratingsCount']"
     )
     if count_el:
-        count_text = count_el.get("content") or count_el.get_text(strip=True)
+        raw_content = count_el.get("content")
+        count_text = (raw_content if isinstance(raw_content, str) else None) or count_el.get_text(strip=True)
         count_text = re.sub(r"[^\d]", "", count_text)
         if count_text:
             book.rating_count = int(count_text)
@@ -171,7 +242,7 @@ def enrich_book(book: Book) -> Book:
     if pub_el:
         pub_text = pub_el.get_text(strip=True)
         date_match = re.search(
-            r"(?:Published|First published)\s+"
+            r"(?:Published|First published|Expected publication)[:\s]+"
             r"(\w+\s+\d{1,2},?\s+\d{4})",
             pub_text,
         )
@@ -194,7 +265,9 @@ def enrich_book(book: Book) -> Book:
     # ISBN
     isbn_el = soup.select_one("meta[property='books:isbn']")
     if isbn_el:
-        book.isbn13 = isbn_el.get("content")
+        val = isbn_el.get("content")
+        if isinstance(val, str):
+            book.isbn13 = val
 
     # Title refinement — use the page's canonical title
     title_el = soup.select_one(
@@ -205,7 +278,11 @@ def enrich_book(book: Book) -> Book:
     if title_el:
         book.title = title_el.get_text(strip=True)
 
-    time.sleep(REQUEST_DELAY)
+    # Warn if enrichment produced no useful data (selector breakage signal)
+    if book.author == "" and book.rating is None:
+        logger.warning("Enrichment returned no author or rating for %r — selectors may be broken", book.title)
+
+    _polite_sleep()
     return book
 
 
@@ -221,6 +298,8 @@ def search_and_enrich(title: str, author: str) -> Book | None:
         return None
 
     href = first_result.get("href", "")
+    if not isinstance(href, str):
+        return None
     full_url = f"https://www.goodreads.com{href}" if href.startswith("/") else href
     full_url = full_url.split("?")[0]
 

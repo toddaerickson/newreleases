@@ -5,8 +5,8 @@ import os
 import smtplib
 import ssl
 from datetime import date
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 
 from scraper import Book
@@ -19,8 +19,8 @@ SHORTLISTS_DIR = Path(__file__).parent / "shortlists"
 def _format_book_entry(i: int, book: Book, markdown: bool = True) -> str:
     """Format a single book entry for markdown or plaintext."""
     genres = ", ".join(book.genre_tags) if book.genre_tags else "—"
-    rating_str = f"{book.rating:.2f}" if book.rating else "N/A"
-    count_str = f"{book.rating_count:,}" if book.rating_count else "N/A"
+    rating_str = f"{book.rating:.2f}" if book.rating is not None else "N/A"
+    count_str = f"{book.rating_count:,}" if book.rating_count is not None else "N/A"
     pub_str = book.pub_date or "Unknown"
 
     if markdown:
@@ -67,8 +67,17 @@ def write_shortlist(books: list[Book], run_date: date | None = None) -> Path:
     return filepath
 
 
-def send_email(books: list[Book], recipient: str, run_date: date | None = None) -> bool:
-    """Send the shortlist as an email. Returns True on success."""
+def send_email(
+    books: list[Book],
+    recipient: str,
+    run_date: date | None = None,
+    min_rating: float = 4.3,
+) -> bool:
+    """Send the shortlist as an email. Returns True on success.
+
+    Uses Gmail SMTP with TLS (port 587). Requires a Gmail App Password
+    (not a regular password) — 2FA must be enabled on the Google account.
+    """
     run_date = run_date or date.today()
 
     smtp_host = os.environ.get("SMTP_HOST", "")
@@ -85,8 +94,24 @@ def send_email(books: list[Book], recipient: str, run_date: date | None = None) 
         logger.error("SMTP_PORT must be an integer; got %r", os.environ.get("SMTP_PORT"))
         return False
 
+    if smtp_port == 465:
+        logger.warning("SMTP_PORT 465 requires SMTP_SSL, but this code uses STARTTLS. Use port 587.")
+        return False
+
+    # Guard against header injection in recipient
+    if "\r" in recipient or "\n" in recipient:
+        logger.error("Recipient contains newline characters — possible header injection")
+        return False
+
+    # Warn about SPF/DKIM for non-Gmail domains
+    if not smtp_user.endswith("@gmail.com"):
+        logger.info("Sending from non-Gmail address %s — ensure SPF/DKIM are configured on the domain", smtp_user)
+
     count = len(books)
-    subject = f"[Books] {count} new candidate{'s' if count != 1 else ''} over 4.3 — {run_date.isoformat()}"
+    subject = (
+        f"[Books] {count} new candidate{'s' if count != 1 else ''} "
+        f"over {min_rating} — {run_date.isoformat()}"
+    )
 
     body_lines = [f"# New book shortlist — {run_date.isoformat()}\n"]
     if not books:
@@ -97,22 +122,25 @@ def send_email(books: list[Book], recipient: str, run_date: date | None = None) 
 
     body = "\n".join(body_lines)
 
-    msg = MIMEMultipart("alternative")
+    msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
     msg["From"] = smtp_user
     msg["To"] = recipient
-    msg.attach(MIMEText(body, "plain"))
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=smtp_host)
 
     try:
         ctx = ssl.create_default_context()
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+            server.ehlo()
             server.starttls(context=ctx)
+            server.ehlo()
             server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_user, [recipient], msg.as_string())
         logger.info("Email sent to %s", recipient)
         return True
     except smtplib.SMTPAuthenticationError:
-        logger.error("SMTP authentication failed — check SMTP_USER and SMTP_PASS.")
+        logger.error("SMTP authentication failed — check SMTP_USER and SMTP_PASS (must be a Gmail App Password).")
         return False
     except smtplib.SMTPException:
         logger.exception("SMTP error sending email to %s", recipient)
