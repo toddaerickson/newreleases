@@ -1,9 +1,9 @@
-name: Weekly Book Filter
+name: Monthly Book Digest
 
 on:
   schedule:
-    # Every Sunday at 23:00 UTC (6 PM CDT / 5 PM CST — drifts by 1h with DST)
-    - cron: "0 23 * * 0"
+    # 1st of each month at 15:00 UTC (10 AM CDT / 9 AM CST)
+    - cron: "0 15 1 * *"
   workflow_dispatch: # Allow manual runs
 
 concurrency:
@@ -11,11 +11,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  filter-books:
+  send-digest:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -28,20 +25,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run book filter
+      - name: Verify database exists
+        run: |
+          if [ ! -f seen_books.db ]; then
+            echo "::error::seen_books.db not found in repo — weekly workflow may not have run yet"
+            exit 1
+          fi
+
+      - name: Send monthly digest
         env:
           BOOK_RECIPIENT: ${{ secrets.BOOK_RECIPIENT }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
-        run: python main.py
-
-      - name: Commit shortlist and database to repo
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add shortlists/ seen_books.db
-          git diff --cached --quiet || git commit -m "Update shortlist and database for $(date +%Y-%m-%d)"
-          git pull --rebase origin master
-          git push
+        run: python digest.py
