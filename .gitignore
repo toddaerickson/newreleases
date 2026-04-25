@@ -1,4 +1,3 @@
-seen_books.db
 __pycache__/
 *.pyc
 .env

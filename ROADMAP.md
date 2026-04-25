@@ -25,11 +25,11 @@ Zero test coverage. Every change to the filter logic, scraper selectors, or dedu
 - `scraper._is_allowed_url()` — verify URL validation
 - Integration test: feed known HTML fixtures through `enrich_book()` and verify parsed fields
 
-**3. Database artifact persistence is brittle**
+**3. ~~Database artifact persistence is brittle~~ (DONE)**
 
-The SQLite database is stored as a GitHub Actions artifact with 400-day retention. If the artifact expires, or if GitHub changes artifact retention policies, the entire dedup history is lost and previously-seen books reappear.
+~~The SQLite database is stored as a GitHub Actions artifact with 400-day retention. If the artifact expires, or if GitHub changes artifact retention policies, the entire dedup history is lost and previously-seen books reappear.~~
 
-*Fix:* Commit `seen_books.db` to the repo (remove from `.gitignore`, add to the commit step in the workflow). SQLite databases are small (~200 KB/year at this volume) and git handles binary diffs reasonably. Alternatively, store the database in a GitHub release asset or a private gist.
+*Fixed:* `seen_books.db` is now committed to the repo. Removed from `.gitignore`, added to the weekly workflow's `git add` step. Artifact upload/download steps removed. Both weekly and monthly workflows use `concurrency: group: book-pipeline` to prevent race conditions.
 
 **4. `search_and_enrich()` is dead code**
 

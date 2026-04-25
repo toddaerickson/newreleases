@@ -148,3 +148,77 @@ def send_email(
     except OSError:
         logger.exception("Network error sending email to %s", recipient)
         return False
+
+
+def send_digest_email(books: list[Book], recipient: str, month_label: str) -> bool:
+    """Send a monthly digest email. Returns True on success.
+
+    Args:
+        books: Books that passed the filter in the digest period.
+        recipient: Email address.
+        month_label: Human-readable label, e.g. "April 2026".
+    """
+    smtp_host = os.environ.get("SMTP_HOST", "")
+    smtp_user = os.environ.get("SMTP_USER", "")
+    smtp_pass = os.environ.get("SMTP_PASS", "")
+
+    if not all([smtp_host, smtp_user, smtp_pass]):
+        logger.warning("SMTP not configured — skipping email. Set SMTP_HOST, SMTP_USER, SMTP_PASS.")
+        return False
+
+    try:
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    except ValueError:
+        logger.error("SMTP_PORT must be an integer; got %r", os.environ.get("SMTP_PORT"))
+        return False
+
+    if smtp_port == 465:
+        logger.warning("SMTP_PORT 465 requires SMTP_SSL, but this code uses STARTTLS. Use port 587.")
+        return False
+
+    if "\r" in recipient or "\n" in recipient:
+        logger.error("Recipient contains newline characters — possible header injection")
+        return False
+
+    if not smtp_user.endswith("@gmail.com"):
+        logger.info("Sending from non-Gmail address %s — ensure SPF/DKIM are configured on the domain", smtp_user)
+
+    count = len(books)
+    subject = f"[Books] Monthly digest: {count} book{'s' if count != 1 else ''} — {month_label}"
+
+    body_lines = [f"# Monthly book digest — {month_label}\n"]
+    if not books:
+        body_lines.append("No books passed the filter this month.\n")
+    else:
+        body_lines.append(f"{count} book{'s' if count != 1 else ''} passed the filter:\n")
+        for i, book in enumerate(books, 1):
+            body_lines.append(_format_book_entry(i, book, markdown=False))
+
+    body = "\n".join(body_lines)
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = recipient
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=smtp_host)
+
+    try:
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+            server.ehlo()
+            server.starttls(context=ctx)
+            server.ehlo()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(smtp_user, [recipient], msg.as_string())
+        logger.info("Digest email sent to %s", recipient)
+        return True
+    except smtplib.SMTPAuthenticationError:
+        logger.error("SMTP authentication failed — check SMTP_USER and SMTP_PASS (must be a Gmail App Password).")
+        return False
+    except smtplib.SMTPException:
+        logger.exception("SMTP error sending digest email to %s", recipient)
+        return False
+    except OSError:
+        logger.exception("Network error sending digest email to %s", recipient)
+        return False

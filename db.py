@@ -127,3 +127,19 @@ def get_books_for_recheck(conn: sqlite3.Connection, days_since_last_check: int =
         (days_since_last_check,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_digest_books(conn: sqlite3.Connection, days: int = 30) -> list[dict]:
+    """Return books that passed the filter within the last `days` days."""
+    rows = conn.execute(
+        """SELECT isbn13, goodreads_id, title, author, pub_date,
+                  first_seen_date, last_rating AS rating,
+                  last_rating_count AS rating_count,
+                  genre_tags, goodreads_url
+           FROM seen_books
+           WHERE passed_filter = 1
+             AND first_seen_date >= date('now', ? || ' days')
+           ORDER BY first_seen_date DESC, title ASC""",
+        (f"-{days}",),
+    ).fetchall()
+    return [dict(r) for r in rows]

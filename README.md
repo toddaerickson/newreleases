@@ -38,6 +38,12 @@ python main.py --window 30 --skip-email --recipient you@example.com
 
 # Re-check books that previously failed the filter (ratings may have improved)
 python main.py --recheck --skip-email --recipient you@example.com
+
+# Monthly digest — summarize books that passed the filter in the last 30 days
+python digest.py --skip-email --recipient you@example.com
+
+# Digest with custom lookback window
+python digest.py --days 60 --skip-email --recipient you@example.com
 ```
 
 ## How it works
@@ -88,7 +94,9 @@ Add these **repository secrets** (Settings > Secrets and variables > Actions > N
 | `SMTP_USER` | Sending email address | `sender@gmail.com` |
 | `SMTP_PASS` | App Password (16-char, from Google) | `abcd efgh ijkl mnop` |
 
-The workflow runs automatically every **Sunday at 6 PM Central** (23:00 UTC). Shortlist markdown files are committed back to the repo under `shortlists/`.
+The weekly workflow runs automatically every **Sunday at 6 PM Central** (23:00 UTC). Shortlist markdown files and the SQLite database are committed back to the repo.
+
+A **monthly digest** workflow runs on the **1st of each month at 10 AM Central** (15:00 UTC), emailing a summary of all books that passed the filter in the previous 30 days.
 
 ## Usage
 
@@ -139,6 +147,7 @@ python main.py --recheck --skip-email --recipient you@example.com
 ```text
 newreleases/
 ├── main.py              # Orchestrator — phases 1-5, CLI entry point
+├── digest.py            # Monthly digest — queries DB, emails summary
 ├── scraper.py           # Goodreads scraping (new releases + book detail pages)
 ├── filters.py           # Rating/count filter logic
 ├── db.py                # SQLite seen_books persistence and dedup
@@ -146,8 +155,10 @@ newreleases/
 ├── requirements.txt     # Python dependencies
 ├── .gitignore
 ├── shortlists/          # Generated markdown shortlists (committed by CI)
+├── seen_books.db        # SQLite database (committed by CI)
 └── .github/workflows/
-    └── weekly.yml       # GitHub Actions weekly cron + manual trigger
+    ├── weekly.yml       # Weekly scrape + filter + email
+    └── monthly.yml      # Monthly digest email
 ```
 
 ### Module details
@@ -158,9 +169,11 @@ newreleases/
 
 **`filters.py`** — Single function `passes_filter()` that checks rating and rating count against caller-provided thresholds. No defaults — the caller (main.py) owns the policy values.
 
-**`notify.py`** — Writes markdown shortlists to `shortlists/shortlist_YYYY-MM-DD.md`. Sends plaintext email via SMTP with STARTTLS (port 587, SSL context enforced). Includes proper `Date` and `Message-ID` headers. Validates recipients against header injection. Rejects port 465 (requires SMTP_SSL, not supported). SMTP config comes entirely from environment variables. Specific exception handling for auth failures vs. network errors vs. SMTP protocol errors.
+**`notify.py`** — Writes markdown shortlists to `shortlists/shortlist_YYYY-MM-DD.md`. Sends plaintext email via SMTP with STARTTLS (port 587, SSL context enforced). Includes proper `Date` and `Message-ID` headers. Validates recipients against header injection. Rejects port 465 (requires SMTP_SSL, not supported). SMTP config comes entirely from environment variables. Specific exception handling for auth failures vs. network errors vs. SMTP protocol errors. Also provides `send_digest_email()` for the monthly digest.
 
 **`main.py`** — Orchestrates the five-phase pipeline: fetch, dedup, enrich, filter, output. All configuration via CLI args or env vars — no hardcoded values. Connection cleanup guaranteed via try/finally.
+
+**`digest.py`** — Monthly digest entry point. Queries `seen_books` for books that passed the filter within a configurable lookback window (default 30 days) and emails a summary. Does not scrape or modify the database — read-only. CLI flags: `--days`, `--recipient`, `--skip-email`.
 
 ## Database schema
 
@@ -239,4 +252,4 @@ Only sent when at least one book passes the filter.
 - **Rate limiting.** Goodreads may return 429 responses under heavy load. The scraper retries automatically with exponential backoff (3s, 6s, 12s) for 429 and 5xx responses. Jittered delays (2-3 seconds) between requests keep volume low (~200 fetches max per run).
 - **No pagination.** The new-releases pages are scraped as single pages. If Goodreads paginates them, only the first page is captured.
 - **Translated works and re-releases** may show recent publication dates but aren't truly "new." These can slip through the filter.
-- **Database persistence in CI** relies on GitHub Actions artifacts (400-day retention). If the artifact expires, the dedup log resets and previously-seen books may reappear.
+- **Database in git.** `seen_books.db` is committed to the repo by the weekly workflow. Binary diffs are small at this scale (~200 KB/year). The database is the single source of dedup history.
