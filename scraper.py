@@ -57,6 +57,7 @@ class Book:
     rating: float | None = None
     rating_count: int | None = None
     genre_tags: list[str] = field(default_factory=list)
+    description: str | None = None
 
 
 def _build_session() -> requests.Session:
@@ -339,6 +340,12 @@ def _enrich_from_apollo(soup: BeautifulSoup, book: Book) -> bool:
     if title:
         book.title = title
 
+    # Description (Apollo stores raw HTML; strip tags for plain text)
+    if not book.description:
+        raw_desc = book_data.get("description", "")
+        if raw_desc and isinstance(raw_desc, str):
+            book.description = BeautifulSoup(raw_desc, "lxml").get_text(" ", strip=True)
+
     # Author
     contrib_edge = book_data.get("primaryContributorEdge", {})
     if isinstance(contrib_edge, dict):
@@ -364,10 +371,36 @@ def _enrich_from_apollo(soup: BeautifulSoup, book: Book) -> bool:
                 if cnt is not None:
                     book.rating_count = int(cnt)
 
-    # Genre tags from BookGenre entities
-    for key, val in apollo.items():
-        if key.startswith("Genre:") and isinstance(val, dict):
-            name = val.get("name")
+    # Genre tags: follow the book entity's own bookGenres edges first.
+    # Chain: book_data.bookGenres[] -> BookGenre entity -> Genre entity -> name
+    for genre_ref in book_data.get("bookGenres", []):
+        if not isinstance(genre_ref, dict):
+            continue
+        bg_key = genre_ref.get("__ref", "")
+        bg_entity = apollo.get(bg_key, {})
+        if not isinstance(bg_entity, dict):
+            continue
+        genre_ptr = bg_entity.get("genre", {})
+        g_key = genre_ptr.get("__ref", "") if isinstance(genre_ptr, dict) else ""
+        g_entity = apollo.get(g_key, {})
+        name = g_entity.get("name") if isinstance(g_entity, dict) else None
+        if name and name not in book.genre_tags and len(book.genre_tags) < 8:
+            book.genre_tags.append(name)
+
+    # Fallback: scan all BookGenre/Genre entities on the page (catches alternate layouts)
+    if not book.genre_tags:
+        for key, val in apollo.items():
+            if not isinstance(val, dict):
+                continue
+            if key.startswith("BookGenre:"):
+                genre_ptr = val.get("genre", {})
+                g_key = genre_ptr.get("__ref", "") if isinstance(genre_ptr, dict) else ""
+                g_entity = apollo.get(g_key, {})
+                name = g_entity.get("name") if isinstance(g_entity, dict) else None
+            elif key.startswith("Genre:"):
+                name = val.get("name")
+            else:
+                continue
             if name and name not in book.genre_tags and len(book.genre_tags) < 8:
                 book.genre_tags.append(name)
 
@@ -489,6 +522,19 @@ def _enrich_from_html(soup: BeautifulSoup, book: Book) -> None:
             "span[class*='GenreButton'] a"
         )
         book.genre_tags = [g.get_text(strip=True) for g in genre_els[:8]]
+        if not book.genre_tags:
+            logger.warning("No genre tags found for %r (%s) — selectors may be stale",
+                           book.title, book.goodreads_url)
+
+    # Description (only if missing)
+    if not book.description:
+        desc_el = soup.select_one(
+            "div.BookPageMetadataSection__description span.Formatted, "
+            "div[class*='BookPageMetadataSection__description'] span, "
+            "div#description span"
+        )
+        if desc_el:
+            book.description = desc_el.get_text(" ", strip=True)
 
 
 def search_and_enrich(title: str, author: str) -> Book | None:

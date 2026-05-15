@@ -1,15 +1,20 @@
 """Markdown output and email notification."""
 
+import html
+import json
 import logging
 import os
 import smtplib
 import ssl
 from datetime import date
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 
 from scraper import Book
+
+CATALOG_URL = "https://toddaerickson.github.io/newreleases/"
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +72,179 @@ def write_shortlist(books: list[Book], run_date: date | None = None) -> Path:
     return filepath
 
 
+def write_catalog(books: list[dict], docs_dir: Path) -> None:
+    """Write docs/books.json and docs/index.html from all-time passed books."""
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Compute delta and build serialisable records
+    records = []
+    for b in books:
+        first = b.get("first_rating")
+        last = b.get("last_rating")
+        delta = round(last - first, 3) if (first is not None and last is not None) else None
+        records.append({
+            "title": b["title"],
+            "author": b["author"],
+            "genre": b.get("genre_tags") or "",
+            "first_seen": b.get("first_seen_date") or "",
+            "rating_first": first,
+            "rating_count_first": b.get("first_rating_count"),
+            "rating_last": last,
+            "rating_count_last": b.get("last_rating_count"),
+            "delta": delta,
+            "goodreads_url": b.get("goodreads_url") or "",
+            "description": b.get("description") or "",
+        })
+
+    (docs_dir / "books.json").write_text(
+        json.dumps(records, indent=2), encoding="utf-8"
+    )
+
+    rows_html = []
+    for r in records:
+        desc = r.get("description") or ""
+        desc_snippet = (desc[:160] + "…") if len(desc) > 160 else desc
+        title_link = (
+            f'<a href="{html.escape(r["goodreads_url"])}" title="{html.escape(desc_snippet)}">'
+            f'{html.escape(r["title"])}</a>'
+            if r["goodreads_url"]
+            else f'<span title="{html.escape(desc_snippet)}">{html.escape(r["title"])}</span>'
+        )
+        title_cell = (
+            f'{title_link}<br><small style="color:#666;font-weight:normal">{html.escape(desc_snippet)}</small>'
+            if desc_snippet else title_link
+        )
+        first_str = (
+            f"{r['rating_first']:.2f} ({r['rating_count_first']:,})"
+            if r["rating_first"] is not None else "—"
+        )
+        last_str = (
+            f"{r['rating_last']:.2f} ({r['rating_count_last']:,})"
+            if r["rating_last"] is not None else "—"
+        )
+        if r["delta"] is None:
+            delta_cell = '<td title="Rating has not been updated since first recorded">—</td>'
+        elif r["delta"] > 0:
+            delta_cell = f'<td class="up">+{r["delta"]:.3f}</td>'
+        elif r["delta"] < 0:
+            delta_cell = f'<td class="down">{r["delta"]:.3f}</td>'
+        else:
+            delta_cell = '<td title="No change since first recorded">—</td>'
+
+        rows_html.append(
+            f"<tr>"
+            f"<td>{title_cell}</td>"
+            f"<td>{html.escape(r['author'])}</td>"
+            f"<td>{html.escape(r['genre'])}</td>"
+            f"<td>{html.escape(r['first_seen'])}</td>"
+            f"<td>{first_str}</td>"
+            f"<td>{last_str}</td>"
+            f"{delta_cell}"
+            f"</tr>"
+        )
+
+    # Collect sorted unique genre tags for the filter dropdown
+    all_genres: list[str] = sorted({
+        g.strip()
+        for r in records
+        for g in r["genre"].split(",")
+        if g.strip()
+    })
+    genre_options = "\n".join(
+        f'<option value="{html.escape(g)}">{html.escape(g)}</option>'
+        for g in all_genres
+    )
+
+    updated = date.today().isoformat()
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Top Book Releases</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; color: #222; }}
+  h1 {{ font-size: 1.4rem; margin-bottom: 0.25rem; }}
+  p.meta {{ font-size: 0.85rem; color: #666; margin-top: 0; }}
+  .toolbar {{ margin: 0.75rem 0; display: flex; align-items: center; gap: 0.5rem; }}
+  .toolbar label {{ font-size: 0.88rem; color: #444; }}
+  .toolbar select {{ font-size: 0.88rem; padding: 0.25rem 0.4rem; border: 1px solid #ccc; border-radius: 4px; }}
+  .toolbar button {{ font-size: 0.82rem; padding: 0.2rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; cursor: pointer; }}
+  .toolbar button:hover {{ background: #e8e8e8; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.88rem; }}
+  th {{ background: #f0f0f0; cursor: pointer; user-select: none; white-space: nowrap; }}
+  th:hover {{ background: #e0e0e0; }}
+  th, td {{ padding: 0.4rem 0.6rem; border: 1px solid #ddd; text-align: left; }}
+  tr:nth-child(even) {{ background: #fafafa; }}
+  tr.hidden {{ display: none; }}
+  td.up {{ color: #1a7f37; font-weight: 600; }}
+  td.down {{ color: #cf222e; font-weight: 600; }}
+  a {{ color: #0969da; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>Top Book Releases</h1>
+<p class="meta">Books rated ≥4.3 with ≥500 ratings. Updated weekly. Last updated: {updated}.</p>
+<div class="toolbar">
+  <label for="gf">Filter by genre:</label>
+  <select id="gf" onchange="filterGenre()">
+    <option value="">All genres</option>
+    {genre_options}
+  </select>
+  <button onclick="document.getElementById('gf').value='';filterGenre();">Clear</button>
+  <span id="count" style="font-size:0.82rem;color:#666"></span>
+</div>
+<table id="t">
+<thead><tr>
+  <th onclick="sort(0)">Title ▲▼</th>
+  <th onclick="sort(1)">Author ▲▼</th>
+  <th onclick="sort(2)">Genre ▲▼</th>
+  <th onclick="sort(3)">First Seen ▲▼</th>
+  <th onclick="sort(4)">Rating (first) ▲▼</th>
+  <th onclick="sort(5)">Rating (now) ▲▼</th>
+  <th onclick="sort(6)">Δ ▲▼</th>
+</tr></thead>
+<tbody>
+{"".join(rows_html)}
+</tbody>
+</table>
+<script>
+let dir = {{}};
+function sort(col) {{
+  const tb = document.querySelector('#t tbody');
+  const rows = Array.from(tb.rows);
+  dir[col] = !dir[col];
+  rows.sort((a, b) => {{
+    const av = a.cells[col].textContent.trim();
+    const bv = b.cells[col].textContent.trim();
+    const an = parseFloat(av.replace(/[^0-9.+-]/g, ''));
+    const bn = parseFloat(bv.replace(/[^0-9.+-]/g, ''));
+    const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : av.localeCompare(bv);
+    return dir[col] ? cmp : -cmp;
+  }});
+  rows.forEach(r => tb.appendChild(r));
+}}
+function filterGenre() {{
+  const val = document.getElementById('gf').value.toLowerCase();
+  let visible = 0;
+  Array.from(document.querySelectorAll('#t tbody tr')).forEach(row => {{
+    const genre = row.cells[2].textContent.toLowerCase();
+    const show = !val || genre.split(',').map(g => g.trim()).includes(val);
+    row.classList.toggle('hidden', !show);
+    if (show) visible++;
+  }});
+  const total = document.querySelectorAll('#t tbody tr').length;
+  document.getElementById('count').textContent = val ? visible + ' of ' + total + ' shown' : '';
+}}
+</script>
+</body>
+</html>"""
+
+    (docs_dir / "index.html").write_text(page, encoding="utf-8")
+    logger.info("Wrote catalog to %s (%d books)", docs_dir, len(records))
+
+
 def send_email(
     books: list[Book],
     recipient: str,
@@ -113,21 +291,69 @@ def send_email(
         f"over {min_rating} — {run_date.isoformat()}"
     )
 
-    body_lines = [f"# New book shortlist — {run_date.isoformat()}\n"]
+    # Plain-text body
+    plain_lines = [
+        f"New book shortlist — {run_date.isoformat()}",
+        f"Full running list: {CATALOG_URL}",
+        "",
+    ]
     if not books:
-        body_lines.append("No new books passed the filter this week.")
+        plain_lines.append("No new books passed the filter this week.")
     else:
         for i, book in enumerate(books, 1):
-            body_lines.append(_format_book_entry(i, book, markdown=False))
+            plain_lines.append(_format_book_entry(i, book, markdown=False))
+    plain_body = "\n".join(plain_lines)
 
-    body = "\n".join(body_lines)
+    # HTML body
+    html_rows = []
+    for i, book in enumerate(books, 1):
+        genres = html.escape(", ".join(book.genre_tags) if book.genre_tags else "—")
+        rating_str = f"{book.rating:.2f}" if book.rating is not None else "N/A"
+        count_str = f"{book.rating_count:,}" if book.rating_count is not None else "N/A"
+        title_link = (
+            f'<a href="{html.escape(book.goodreads_url)}">{html.escape(book.title)}</a>'
+            if book.goodreads_url else html.escape(book.title)
+        )
+        desc = book.description or ""
+        desc_snippet = (desc[:160] + "…") if len(desc) > 160 else desc
+        title_cell = (
+            f'{title_link}<br><span style="font-size:0.85em;color:#666">{html.escape(desc_snippet)}</span>'
+            if desc_snippet else title_link
+        )
+        html_rows.append(
+            f"<tr><td>{i}</td><td>{title_cell}</td>"
+            f"<td>{html.escape(book.author)}</td>"
+            f"<td>{genres}</td>"
+            f"<td>{rating_str} ({count_str})</td>"
+            f"<td>{html.escape(book.pub_date or 'Unknown')}</td></tr>"
+        )
 
-    msg = MIMEText(body, "plain", "utf-8")
+    if books:
+        table_html = (
+            "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse;font-size:0.9em'>"
+            "<thead><tr><th>#</th><th>Title</th><th>Author</th><th>Genre</th>"
+            "<th>Rating</th><th>Published</th></tr></thead>"
+            "<tbody>" + "".join(html_rows) + "</tbody></table>"
+        )
+    else:
+        table_html = "<p>No new books passed the filter this week.</p>"
+
+    html_body = f"""<!DOCTYPE html>
+<html><body style="font-family:system-ui,sans-serif;max-width:700px;margin:0 auto;padding:1rem">
+<h2>New book shortlist — {run_date.isoformat()}</h2>
+<p><a href="{CATALOG_URL}">View the full running list with rating history →</a></p>
+{table_html}
+<p style="font-size:0.8em;color:#666">Filtered: ≥{min_rating} rating, ≥500 ratings</p>
+</body></html>"""
+
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = smtp_user
     msg["To"] = recipient
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain=smtp_host)
+    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         ctx = ssl.create_default_context()
