@@ -126,6 +126,7 @@ def run(
                 passed_filter=hit,
                 genre_tags=", ".join(book.genre_tags) if book.genre_tags else None,
                 goodreads_url=book.goodreads_url,
+                description=book.description,
             )
             if hit:
                 passed.append(book)
@@ -145,8 +146,8 @@ def run(
                 except Exception as e:
                     logger.error("Detail enrichment crashed for %r: %s", book.title, e)
                     continue
-                # Write genres/pub_date back to DB — enrichment updates the in-memory
-                # Book object but the DB row was logged before this pass ran.
+                # Write genres/pub_date/description back to DB — enrichment updates
+                # the in-memory Book object but the DB row was logged before this pass.
                 log_book(
                     conn,
                     title=book.title,
@@ -158,6 +159,7 @@ def run(
                     passed_filter=True,
                     genre_tags=", ".join(book.genre_tags) if book.genre_tags else None,
                     goodreads_url=book.goodreads_url,
+                    description=book.description,
                 )
 
         # --- Phase 4b: Re-check previously failed books (quarterly) ---

@@ -93,6 +93,7 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
             "rating_count_last": b.get("last_rating_count"),
             "delta": delta,
             "goodreads_url": b.get("goodreads_url") or "",
+            "description": b.get("description") or "",
         })
 
     (docs_dir / "books.json").write_text(
@@ -101,10 +102,17 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
 
     rows_html = []
     for r in records:
-        title_cell = (
-            f'<a href="{html.escape(r["goodreads_url"])}">{html.escape(r["title"])}</a>'
+        desc = r.get("description") or ""
+        desc_snippet = (desc[:160] + "…") if len(desc) > 160 else desc
+        title_link = (
+            f'<a href="{html.escape(r["goodreads_url"])}" title="{html.escape(desc_snippet)}">'
+            f'{html.escape(r["title"])}</a>'
             if r["goodreads_url"]
-            else html.escape(r["title"])
+            else f'<span title="{html.escape(desc_snippet)}">{html.escape(r["title"])}</span>'
+        )
+        title_cell = (
+            f'{title_link}<br><small style="color:#666;font-weight:normal">{html.escape(desc_snippet)}</small>'
+            if desc_snippet else title_link
         )
         first_str = (
             f"{r['rating_first']:.2f} ({r['rating_count_first']:,})"
@@ -115,13 +123,13 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
             if r["rating_last"] is not None else "—"
         )
         if r["delta"] is None:
-            delta_cell = "<td>—</td>"
+            delta_cell = '<td title="Rating has not been updated since first recorded">—</td>'
         elif r["delta"] > 0:
             delta_cell = f'<td class="up">+{r["delta"]:.3f}</td>'
         elif r["delta"] < 0:
             delta_cell = f'<td class="down">{r["delta"]:.3f}</td>'
         else:
-            delta_cell = "<td>—</td>"
+            delta_cell = '<td title="No change since first recorded">—</td>'
 
         rows_html.append(
             f"<tr>"
@@ -135,6 +143,18 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
             f"</tr>"
         )
 
+    # Collect sorted unique genre tags for the filter dropdown
+    all_genres: list[str] = sorted({
+        g.strip()
+        for r in records
+        for g in r["genre"].split(",")
+        if g.strip()
+    })
+    genre_options = "\n".join(
+        f'<option value="{html.escape(g)}">{html.escape(g)}</option>'
+        for g in all_genres
+    )
+
     updated = date.today().isoformat()
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -146,11 +166,17 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
   body {{ font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; color: #222; }}
   h1 {{ font-size: 1.4rem; margin-bottom: 0.25rem; }}
   p.meta {{ font-size: 0.85rem; color: #666; margin-top: 0; }}
+  .toolbar {{ margin: 0.75rem 0; display: flex; align-items: center; gap: 0.5rem; }}
+  .toolbar label {{ font-size: 0.88rem; color: #444; }}
+  .toolbar select {{ font-size: 0.88rem; padding: 0.25rem 0.4rem; border: 1px solid #ccc; border-radius: 4px; }}
+  .toolbar button {{ font-size: 0.82rem; padding: 0.2rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; cursor: pointer; }}
+  .toolbar button:hover {{ background: #e8e8e8; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 0.88rem; }}
   th {{ background: #f0f0f0; cursor: pointer; user-select: none; white-space: nowrap; }}
   th:hover {{ background: #e0e0e0; }}
   th, td {{ padding: 0.4rem 0.6rem; border: 1px solid #ddd; text-align: left; }}
   tr:nth-child(even) {{ background: #fafafa; }}
+  tr.hidden {{ display: none; }}
   td.up {{ color: #1a7f37; font-weight: 600; }}
   td.down {{ color: #cf222e; font-weight: 600; }}
   a {{ color: #0969da; text-decoration: none; }}
@@ -159,8 +185,16 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
 </head>
 <body>
 <h1>Top Book Releases</h1>
-<p class="meta">Books rated ≥4.3 with ≥500 ratings. Updated weekly. Last updated: {updated}. &nbsp;
-<a href="books.json">books.json</a></p>
+<p class="meta">Books rated ≥4.3 with ≥500 ratings. Updated weekly. Last updated: {updated}.</p>
+<div class="toolbar">
+  <label for="gf">Filter by genre:</label>
+  <select id="gf" onchange="filterGenre()">
+    <option value="">All genres</option>
+    {genre_options}
+  </select>
+  <button onclick="document.getElementById('gf').value='';filterGenre();">Clear</button>
+  <span id="count" style="font-size:0.82rem;color:#666"></span>
+</div>
 <table id="t">
 <thead><tr>
   <th onclick="sort(0)">Title ▲▼</th>
@@ -190,6 +224,18 @@ function sort(col) {{
     return dir[col] ? cmp : -cmp;
   }});
   rows.forEach(r => tb.appendChild(r));
+}}
+function filterGenre() {{
+  const val = document.getElementById('gf').value.toLowerCase();
+  let visible = 0;
+  Array.from(document.querySelectorAll('#t tbody tr')).forEach(row => {{
+    const genre = row.cells[2].textContent.toLowerCase();
+    const show = !val || genre.split(',').map(g => g.trim()).includes(val);
+    row.classList.toggle('hidden', !show);
+    if (show) visible++;
+  }});
+  const total = document.querySelectorAll('#t tbody tr').length;
+  document.getElementById('count').textContent = val ? visible + ' of ' + total + ' shown' : '';
 }}
 </script>
 </body>
@@ -264,9 +310,15 @@ def send_email(
         genres = html.escape(", ".join(book.genre_tags) if book.genre_tags else "—")
         rating_str = f"{book.rating:.2f}" if book.rating is not None else "N/A"
         count_str = f"{book.rating_count:,}" if book.rating_count is not None else "N/A"
-        title_cell = (
+        title_link = (
             f'<a href="{html.escape(book.goodreads_url)}">{html.escape(book.title)}</a>'
             if book.goodreads_url else html.escape(book.title)
+        )
+        desc = book.description or ""
+        desc_snippet = (desc[:160] + "…") if len(desc) > 160 else desc
+        title_cell = (
+            f'{title_link}<br><span style="font-size:0.85em;color:#666">{html.escape(desc_snippet)}</span>'
+            if desc_snippet else title_link
         )
         html_rows.append(
             f"<tr><td>{i}</td><td>{title_cell}</td>"

@@ -57,6 +57,7 @@ class Book:
     rating: float | None = None
     rating_count: int | None = None
     genre_tags: list[str] = field(default_factory=list)
+    description: str | None = None
 
 
 def _build_session() -> requests.Session:
@@ -339,6 +340,12 @@ def _enrich_from_apollo(soup: BeautifulSoup, book: Book) -> bool:
     if title:
         book.title = title
 
+    # Description (Apollo stores raw HTML; strip tags for plain text)
+    if not book.description:
+        raw_desc = book_data.get("description", "")
+        if raw_desc and isinstance(raw_desc, str):
+            book.description = BeautifulSoup(raw_desc, "lxml").get_text(" ", strip=True)
+
     # Author
     contrib_edge = book_data.get("primaryContributorEdge", {})
     if isinstance(contrib_edge, dict):
@@ -518,6 +525,16 @@ def _enrich_from_html(soup: BeautifulSoup, book: Book) -> None:
         if not book.genre_tags:
             logger.warning("No genre tags found for %r (%s) — selectors may be stale",
                            book.title, book.goodreads_url)
+
+    # Description (only if missing)
+    if not book.description:
+        desc_el = soup.select_one(
+            "div.BookPageMetadataSection__description span.Formatted, "
+            "div[class*='BookPageMetadataSection__description'] span, "
+            "div#description span"
+        )
+        if desc_el:
+            book.description = desc_el.get_text(" ", strip=True)
 
 
 def search_and_enrich(title: str, author: str) -> Book | None:

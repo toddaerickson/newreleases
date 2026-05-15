@@ -26,12 +26,18 @@ CREATE TABLE IF NOT EXISTS seen_books (
     passed_filter   BOOLEAN,
     genre_tags      TEXT,
     goodreads_url   TEXT,
+    description     TEXT,
     notes           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_title_author
     ON seen_books(LOWER(title), LOWER(author));
 """
+
+# Migrations for existing databases (safe to re-run; errors are swallowed)
+MIGRATIONS = [
+    "ALTER TABLE seen_books ADD COLUMN description TEXT",
+]
 
 
 def _title_author_hash(title: str, author: str) -> str:
@@ -51,6 +57,13 @@ def get_conn(db_path: Path = DB_PATH) -> sqlite3.Connection:
             if statement:
                 conn.execute(statement)
         conn.commit()
+        # Apply migrations; ignore errors (column may already exist)
+        for migration in MIGRATIONS:
+            try:
+                conn.execute(migration)
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
     except sqlite3.Error as e:
         conn.close()
         raise RuntimeError(f"Failed to initialize DB at {db_path}") from e
@@ -77,6 +90,7 @@ def log_book(
     passed_filter: bool = False,
     genre_tags: str | None = None,
     goodreads_url: str | None = None,
+    description: str | None = None,
     notes: str | None = None,
 ) -> None:
     """Insert or update a book in the seen log."""
@@ -89,9 +103,10 @@ def log_book(
             conn.execute(
                 """UPDATE seen_books
                    SET last_checked_date = ?, last_rating = ?, last_rating_count = ?,
-                       passed_filter = ?, genre_tags = COALESCE(?, genre_tags)
+                       passed_filter = ?, genre_tags = COALESCE(?, genre_tags),
+                       description = COALESCE(?, description)
                  WHERE isbn13 = ?""",
-                (today, rating, rating_count, passed_filter, genre_tags, key),
+                (today, rating, rating_count, passed_filter, genre_tags, description, key),
             )
         else:
             conn.execute(
@@ -100,14 +115,14 @@ def log_book(
                     first_seen_date, last_checked_date,
                     first_rating, first_rating_count,
                     last_rating, last_rating_count,
-                    passed_filter, genre_tags, goodreads_url, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    passed_filter, genre_tags, goodreads_url, description, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     key, goodreads_id, title, author, pub_date,
                     today, today,
                     rating, rating_count,
                     rating, rating_count,
-                    passed_filter, genre_tags, goodreads_url, notes,
+                    passed_filter, genre_tags, goodreads_url, description, notes,
                 ),
             )
         conn.commit()
@@ -148,7 +163,7 @@ def get_all_catalog_books(conn: sqlite3.Connection) -> list[dict]:
                   first_seen_date,
                   first_rating, first_rating_count,
                   last_rating, last_rating_count,
-                  genre_tags, goodreads_url
+                  genre_tags, goodreads_url, description
            FROM seen_books
            WHERE passed_filter = 1
            ORDER BY first_seen_date DESC, title ASC"""
