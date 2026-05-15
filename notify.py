@@ -143,13 +143,16 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
             f"</tr>"
         )
 
-    # Collect sorted unique genre tags for the filter dropdown
-    all_genres: list[str] = sorted({
+    # Collect genres for the filter dropdown — only those in 2+ books so the
+    # list stays manageable; single-book tags are still stored and searchable.
+    from collections import Counter
+    genre_counts = Counter(
         g.strip()
         for r in records
         for g in r["genre"].split(",")
         if g.strip()
-    })
+    )
+    all_genres: list[str] = sorted(g for g, n in genre_counts.items() if n >= 2)
     genre_options = "\n".join(
         f'<option value="{html.escape(g)}">{html.escape(g)}</option>'
         for g in all_genres
@@ -185,7 +188,7 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
 </head>
 <body>
 <h1>Top Book Releases</h1>
-<p class="meta">Books rated ≥4.3 with ≥500 ratings. Updated weekly. Last updated: {updated}.</p>
+<p class="meta">Books rated ≥4.1 with ≥500 ratings. Updated weekly. Last updated: {updated}.</p>
 <div class="toolbar">
   <label for="gf">Filter by genre:</label>
   <select id="gf" onchange="filterGenre()">
@@ -343,7 +346,7 @@ def send_email(
 <h2>New book shortlist — {run_date.isoformat()}</h2>
 <p><a href="{CATALOG_URL}">View the full running list with rating history →</a></p>
 {table_html}
-<p style="font-size:0.8em;color:#666">Filtered: ≥{min_rating} rating, ≥500 ratings</p>
+<p style="font-size:0.8em;color:#666">Filter: ≥{min_rating} Goodreads rating, ≥500 ratings</p>
 </body></html>"""
 
     msg = MIMEMultipart("alternative")

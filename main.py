@@ -67,7 +67,7 @@ def backfill_genres(conn) -> None:
 
 def run(
     window_days: int = 90,
-    min_rating: float = 4.3,
+    min_rating: float = 4.1,
     min_rating_count: int = 500,
     recipient: str | None = None,
     recheck: bool = False,
@@ -217,8 +217,8 @@ def main():
     parser = argparse.ArgumentParser(description="New Release Book Filter")
     parser.add_argument("--window", type=int, default=90,
                         help="Trailing days to consider as 'new' (default: 90)")
-    parser.add_argument("--min-rating", type=float, default=4.3,
-                        help="Minimum Goodreads rating (default: 4.3)")
+    parser.add_argument("--min-rating", type=float, default=4.1,
+                        help="Minimum Goodreads rating (default: 4.1)")
     parser.add_argument("--min-count", type=int, default=500,
                         help="Minimum number of ratings (default: 500)")
     parser.add_argument("--recipient", default=None,

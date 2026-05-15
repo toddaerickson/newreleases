@@ -16,6 +16,25 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+# Tags Goodreads shelves that are formats, audience labels, or tropes — not genres.
+# Filtered out at scrape time so the genre column stays meaningful.
+GENRE_BLOCKLIST = {
+    # Format / delivery
+    "Audiobook",
+    # Audience / context
+    "Adult", "Book Club", "Summer Reads", "Summer",
+    # Romance tropes (not genres)
+    "Enemies To Lovers", "Forced Proximity", "Friends To Lovers",
+    "Small Town Romance", "Billionaire Romance", "Workplace Romance",
+    "Sports Romance", "Slow Burn",
+    # Redundant compounds (components are kept separately)
+    "Contemporary Romance", "Fantasy Romance", "Mystery Thriller",
+    "Biography Memoir", "Romantic Suspense",
+    # Topic/setting tags
+    "Books About Books", "Marriage", "London", "Race", "Grief",
+    "World War II", "Found Family", "Family Saga",
+}
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -384,7 +403,7 @@ def _enrich_from_apollo(soup: BeautifulSoup, book: Book) -> bool:
         g_key = genre_ptr.get("__ref", "") if isinstance(genre_ptr, dict) else ""
         g_entity = apollo.get(g_key, {})
         name = g_entity.get("name") if isinstance(g_entity, dict) else None
-        if name and name not in book.genre_tags and len(book.genre_tags) < 8:
+        if name and name not in GENRE_BLOCKLIST and name not in book.genre_tags and len(book.genre_tags) < 8:
             book.genre_tags.append(name)
 
     # Fallback: scan all BookGenre/Genre entities on the page (catches alternate layouts)
@@ -401,7 +420,7 @@ def _enrich_from_apollo(soup: BeautifulSoup, book: Book) -> bool:
                 name = val.get("name")
             else:
                 continue
-            if name and name not in book.genre_tags and len(book.genre_tags) < 8:
+            if name and name not in GENRE_BLOCKLIST and name not in book.genre_tags and len(book.genre_tags) < 8:
                 book.genre_tags.append(name)
 
     return book.author != "" or book.rating is not None
@@ -521,7 +540,10 @@ def _enrich_from_html(soup: BeautifulSoup, book: Book) -> None:
             "a.actionLinkLite.bookPageGenreLink, "
             "span[class*='GenreButton'] a"
         )
-        book.genre_tags = [g.get_text(strip=True) for g in genre_els[:8]]
+        book.genre_tags = [
+            g.get_text(strip=True) for g in genre_els
+            if g.get_text(strip=True) not in GENRE_BLOCKLIST
+        ][:8]
         if not book.genre_tags:
             logger.warning("No genre tags found for %r (%s) — selectors may be stale",
                            book.title, book.goodreads_url)
