@@ -121,7 +121,7 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
         elif r["delta"] < 0:
             delta_cell = f'<td class="down">{r["delta"]:.3f}</td>'
         else:
-            delta_cell = "<td>0.000</td>"
+            delta_cell = "<td>—</td>"
 
         rows_html.append(
             f"<tr>"
@@ -196,7 +196,7 @@ function sort(col) {{
 </html>"""
 
     (docs_dir / "index.html").write_text(page, encoding="utf-8")
-    logger.info("Wrote catalog to %s ({} books)", docs_dir, len(records))
+    logger.info("Wrote catalog to %s (%d books)", docs_dir, len(records))
 
 
 def send_email(
