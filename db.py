@@ -129,6 +129,18 @@ def get_books_for_recheck(conn: sqlite3.Connection, days_since_last_check: int =
     return [dict(r) for r in rows]
 
 
+def get_books_missing_genres(conn: sqlite3.Connection) -> list[dict]:
+    """Return passed books that have no genre_tags stored, for backfill."""
+    rows = conn.execute(
+        """SELECT isbn13, title, author, goodreads_url, goodreads_id
+           FROM seen_books
+           WHERE passed_filter = 1
+             AND (genre_tags IS NULL OR genre_tags = '')
+             AND goodreads_url IS NOT NULL"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_all_catalog_books(conn: sqlite3.Connection) -> list[dict]:
     """Return all books that ever passed the filter, newest first."""
     rows = conn.execute(
