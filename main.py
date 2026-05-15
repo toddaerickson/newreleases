@@ -12,11 +12,12 @@ import logging
 import os
 import sys
 from datetime import date
+from pathlib import Path
 
-from db import get_conn, is_seen, log_book, get_books_for_recheck
+from db import get_conn, is_seen, log_book, get_books_for_recheck, get_all_catalog_books
 from scraper import Book, fetch_new_releases, enrich_book
 from filters import passes_filter
-from notify import write_shortlist, send_email
+from notify import write_shortlist, send_email, write_catalog
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,9 +131,14 @@ def run(
         shortlist_path = write_shortlist(passed, today)
         logger.info("Shortlist: %s", shortlist_path)
 
+        catalog_books = get_all_catalog_books(conn)
+        write_catalog(catalog_books, Path(__file__).parent / "docs")
+        logger.info("Catalog updated (%d all-time books)", len(catalog_books))
+
         if passed and not skip_email:
             if not send_email(passed, recipient, today, min_rating=min_rating):
-                logger.warning("Email delivery failed for %d books — check SMTP config.", len(passed))
+                logger.error("Email delivery failed — failing the run.")
+                sys.exit(1)
         elif not passed:
             logger.info("No books passed the filter — no email sent.")
 

@@ -129,6 +129,21 @@ def get_books_for_recheck(conn: sqlite3.Connection, days_since_last_check: int =
     return [dict(r) for r in rows]
 
 
+def get_all_catalog_books(conn: sqlite3.Connection) -> list[dict]:
+    """Return all books that ever passed the filter, newest first."""
+    rows = conn.execute(
+        """SELECT isbn13, title, author, pub_date,
+                  first_seen_date,
+                  first_rating, first_rating_count,
+                  last_rating, last_rating_count,
+                  genre_tags, goodreads_url
+           FROM seen_books
+           WHERE passed_filter = 1
+           ORDER BY first_seen_date DESC, title ASC"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_digest_books(conn: sqlite3.Connection, days: int = 30) -> list[dict]:
     """Return books that passed the filter within the last `days` days."""
     rows = conn.execute(
