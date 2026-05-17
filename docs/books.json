@@ -1,8 +1,21 @@
 [
   {
+    "title": "Dissection of a Murder",
+    "author": "Jo Murray",
+    "genre": "Thriller, Mystery, Fiction, Legal Thriller, Crime, Suspense",
+    "first_seen": "2026-05-17",
+    "rating_first": 4.24,
+    "rating_count_first": 2842,
+    "rating_last": 4.24,
+    "rating_count_last": 2842,
+    "delta": 0.0,
+    "goodreads_url": "https://www.goodreads.com/book/show/240187298-dissection-of-a-murder",
+    "description": "Nothing is as it seems\u2014and no one is telling the truth\u2014in this page-turning thriller about a young lawyer forced to defend a man on trial for murder against the mentor who taught her everything: her husband. When Leila Reynolds is handed her first murder case, she\u2019s shocked by the victim: a well-known, well-respected judge, whose death sent shockwaves through the legal community. She\u2019s also incredulous\u2014she\u2019s nowhere near experienced enough to handle such a high-profile assignment\u2014but the defendant is insistent: he wants her, and only her, to represent him. Except he\u2019s refusing to talk. And if that wasn\u2019t complicated enough, Leila soon learns her opponent is the most ruthless prosecutor she\u2019s ever known: her husband. It\u2019s an impossible situation, yet Leila is determined to sway the jury to her side\u2014until she\u2019s blindsided once again by a shadowy figure from her past. Suddenly, Leila finds herself fighting not only for her client and marriage, but also to keep her own secrets buried. And if she has to rewrite the rules to win, so be it."
+  },
+  {
     "title": "A Parade of Horribles",
     "author": "Matt Dinniman",
-    "genre": "Fantasy, Science Fiction, Audiobook, Fiction, Humor, Dystopia, Adventure",
+    "genre": "Fantasy, Science Fiction, Fiction, Humor, Dystopia, Adventure",
     "first_seen": "2026-05-03",
     "rating_first": 4.68,
     "rating_count_first": 1289,
@@ -15,7 +28,7 @@
   {
     "title": "Fury Bound",
     "author": "Sable Sorensen",
-    "genre": "Fantasy, Romantasy, Romance, Fantasy Romance, Audiobook, Vampires, Fiction",
+    "genre": "Fantasy, Romantasy, Romance, Vampires, Fiction",
     "first_seen": "2026-05-03",
     "rating_first": 4.67,
     "rating_count_first": 589,
@@ -28,7 +41,7 @@
   {
     "title": "Our Perfect Storm",
     "author": "Carley Fortune",
-    "genre": "Romance, Summer, Summer Reads, Fiction, Contemporary, Contemporary Romance, Audiobook",
+    "genre": "Romance, Fiction, Contemporary",
     "first_seen": "2026-05-03",
     "rating_first": 4.44,
     "rating_count_first": 1083,
@@ -41,7 +54,7 @@
   {
     "title": "Phoebe Berman's Gonna Lose It",
     "author": "Brooke Averick",
-    "genre": "Romance, Fiction, Contemporary, Contemporary Romance, Rom Com, Adult, Book Club",
+    "genre": "Romance, Fiction, Contemporary, Rom Com",
     "first_seen": "2026-05-03",
     "rating_first": 4.73,
     "rating_count_first": 886,
@@ -54,7 +67,7 @@
   {
     "title": "The Burning Side",
     "author": "Sarah Damoff",
-    "genre": "Fiction, Literary Fiction, Contemporary, Historical Fiction, Romance, Book Club, Family Drama",
+    "genre": "Fiction, Literary Fiction, Contemporary, Historical Fiction, Romance, Family Drama",
     "first_seen": "2026-05-03",
     "rating_first": 4.63,
     "rating_count_first": 719,
@@ -67,7 +80,7 @@
   {
     "title": "The Calamity Club",
     "author": "Kathryn Stockett",
-    "genre": "Historical Fiction, Fiction, Historical, Book Club, Audiobook, Literary Fiction, Feminism",
+    "genre": "Historical Fiction, Fiction, Historical, Literary Fiction, Feminism",
     "first_seen": "2026-05-03",
     "rating_first": 4.41,
     "rating_count_first": 567,
@@ -80,7 +93,7 @@
   {
     "title": "London Falling: A Mysterious Death in a Gilded City and a Family's Search for Truth",
     "author": "Patrick Radden Keefe",
-    "genre": "Nonfiction, True Crime, Audiobook, History, Crime, Mystery, London",
+    "genre": "Nonfiction, True Crime, History, Crime, Mystery",
     "first_seen": "2026-04-26",
     "rating_first": 4.47,
     "rating_count_first": 5664,
@@ -93,7 +106,7 @@
   {
     "title": "Starside",
     "author": "Alex Aster",
-    "genre": "Fantasy, Romantasy, Romance, Enemies To Lovers, Fantasy Romance, Magic, Audiobook",
+    "genre": "Fantasy, Romantasy, Romance, Magic",
     "first_seen": "2026-04-26",
     "rating_first": 4.34,
     "rating_count_first": 9586,
@@ -106,7 +119,7 @@
   {
     "title": "Across the Vanishing Sky",
     "author": "Catherine Cowles",
-    "genre": "Romance, Romantic Suspense, Small Town Romance, Found Family, Suspense, Contemporary Romance, Contemporary",
+    "genre": "Romance, Suspense, Contemporary",
     "first_seen": "2026-04-25",
     "rating_first": 4.4,
     "rating_count_first": 25682,
@@ -119,7 +132,7 @@
   {
     "title": "Daggermouth",
     "author": "H.M.  Wolfe",
-    "genre": "Fantasy, Dystopia, Dark Romance, Romantasy, Romance, Enemies To Lovers, Fiction",
+    "genre": "Fantasy, Dystopia, Dark Romance, Romantasy, Romance, Fiction",
     "first_seen": "2026-04-25",
     "rating_first": 4.38,
     "rating_count_first": 62799,
@@ -132,7 +145,7 @@
   {
     "title": "In Her Own League",
     "author": "Liz Tomforde",
-    "genre": "Romance, Sports Romance, Sports, Contemporary Romance, Enemies To Lovers, Workplace Romance, Audiobook",
+    "genre": "Romance, Sports",
     "first_seen": "2026-04-25",
     "rating_first": 4.37,
     "rating_count_first": 125523,
@@ -145,7 +158,7 @@
   {
     "title": "Into the Blue",
     "author": "Emma Brodie",
-    "genre": "Romance, Fiction, Audiobook, Contemporary, Contemporary Romance, Book Club, Friends To Lovers",
+    "genre": "Romance, Fiction, Contemporary",
     "first_seen": "2026-04-25",
     "rating_first": 4.31,
     "rating_count_first": 5301,
@@ -158,7 +171,7 @@
   {
     "title": "Keeper of Lost Children",
     "author": "Sadeqa  Johnson",
-    "genre": "Historical Fiction, Fiction, Audiobook, Historical, World War II, Book Club, Race",
+    "genre": "Historical Fiction, Fiction, Historical",
     "first_seen": "2026-04-25",
     "rating_first": 4.47,
     "rating_count_first": 17690,
@@ -171,7 +184,7 @@
   {
     "title": "King of Gluttony",
     "author": "Ana Huang",
-    "genre": "Romance, Contemporary Romance, Enemies To Lovers, Dark Romance, Contemporary, Billionaire Romance, Forced Proximity",
+    "genre": "Romance, Dark Romance, Contemporary",
     "first_seen": "2026-04-25",
     "rating_first": 4.47,
     "rating_count_first": 580,
@@ -184,7 +197,7 @@
   {
     "title": "Mad Mabel",
     "author": "Sally Hepworth",
-    "genre": "Mystery, Fiction, Thriller, Audiobook, Mystery Thriller, Book Club, Crime",
+    "genre": "Mystery, Fiction, Thriller, Crime",
     "first_seen": "2026-04-25",
     "rating_first": 4.39,
     "rating_count_first": 37337,
@@ -197,7 +210,7 @@
   {
     "title": "Mistakes Were Made",
     "author": "Lucy Score",
-    "genre": "Romance, Audiobook, Contemporary, Contemporary Romance, Small Town Romance, Rom Com, Fiction",
+    "genre": "Romance, Contemporary, Rom Com, Fiction",
     "first_seen": "2026-04-25",
     "rating_first": 4.3,
     "rating_count_first": 29030,
@@ -210,7 +223,7 @@
   {
     "title": "Rites of the Starling",
     "author": "Devney Perry",
-    "genre": "Fantasy, Romantasy, Audiobook, Romance, Fantasy Romance, Magic, Fiction",
+    "genre": "Fantasy, Romantasy, Romance, Magic, Fiction",
     "first_seen": "2026-04-25",
     "rating_first": 4.55,
     "rating_count_first": 57619,
@@ -223,7 +236,7 @@
   {
     "title": "Strangers: A Memoir of Marriage",
     "author": "Belle Burden",
-    "genre": "Memoir, Nonfiction, Audiobook, Book Club, Biography, Biography Memoir, Marriage",
+    "genre": "Memoir, Nonfiction, Biography",
     "first_seen": "2026-04-25",
     "rating_first": 4.31,
     "rating_count_first": 74081,
@@ -236,7 +249,7 @@
   {
     "title": "The Poet Empress",
     "author": "Shen Tao",
-    "genre": "Fantasy, Historical Fiction, Romance, Fiction, Romantasy, Adult, Audiobook",
+    "genre": "Fantasy, Historical Fiction, Romance, Fiction, Romantasy",
     "first_seen": "2026-04-25",
     "rating_first": 4.44,
     "rating_count_first": 15514,
@@ -249,7 +262,7 @@
   {
     "title": "This Book Made Me Think of You",
     "author": "Libby  Page",
-    "genre": "Romance, Fiction, Audiobook, Books About Books, Contemporary, Book Club, Grief",
+    "genre": "Romance, Fiction, Contemporary",
     "first_seen": "2026-04-25",
     "rating_first": 4.37,
     "rating_count_first": 36739,
@@ -262,7 +275,7 @@
   {
     "title": "We Burned So Bright",
     "author": "T.J. Klune",
-    "genre": "Fantasy, Fiction, Science Fiction, LGBT, Audiobook, Romance, Queer",
+    "genre": "Fantasy, Fiction, Science Fiction, LGBT, Romance, Queer",
     "first_seen": "2026-04-25",
     "rating_first": 4.38,
     "rating_count_first": 1692,
