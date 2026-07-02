@@ -77,6 +77,19 @@ class Book:
     rating_count: int | None = None
     genre_tags: list[str] = field(default_factory=list)
     description: str | None = None
+    # Source of this book: "goodreads" (default) or "storygraph". Keeps every
+    # existing Goodreads code path untouched while letting a second source flow
+    # through the same filter/dedup/output pipeline.
+    source: str = "goodreads"
+    storygraph_url: str | None = None
+    storygraph_id: str | None = None
+
+
+def book_link(book: Book) -> str | None:
+    """Return the canonical link for a book, based on its source."""
+    if book.source == "storygraph":
+        return book.storygraph_url
+    return book.goodreads_url
 
 
 def _build_session() -> requests.Session:
