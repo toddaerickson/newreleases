@@ -32,6 +32,8 @@ def _dict_to_book(row: dict) -> Book:
         rating=row.get("rating"),
         rating_count=row.get("rating_count"),
         genre_tags=genres,
+        source=row.get("source") or "goodreads",
+        storygraph_url=row.get("storygraph_url"),
     )
 
 

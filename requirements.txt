@@ -1,3 +1,6 @@
 requests>=2.31.0,<3.0.0
 beautifulsoup4>=4.12.0,<5.0.0
 lxml>=6.1.0,<7.0.0
+# StoryGraph sits behind a Cloudflare managed challenge that plain requests
+# cannot pass; curl_cffi impersonates a real Chrome TLS fingerprint to fetch it.
+curl_cffi>=0.7.0,<1.0.0
