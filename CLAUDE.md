@@ -22,11 +22,11 @@ python digest.py --days 30 --skip-email --recipient you@example.com
 ```
 
 ## Architecture
-Five-phase pipeline: *fetch* (Goodreads) → *dedup* (SQLite) → *enrich* (detail pages) → *filter* (rating/count) → *output* (markdown + email).
+Five-phase pipeline: *fetch* (Goodreads) → *dedup* (SQLite) → *enrich* (detail pages) → *filter* (rating/count) → *genre exclusion* → *output* (markdown + email).
 
 - `scraper.py` — HTML parsing (BeautifulSoup/lxml), persistent session with retry/backoff, jittered delays, Cloudflare detection, URL allowlist.
 - `db.py` — SQLite with ISBN-13 primary key (fallback: title+author SHA-256 hash). Tracks first/last ratings for re-evaluation.
-- `filters.py` — Single-responsibility rating/count checker (no defaults — caller owns policy).
+- `filters.py` — Rating/count checker + genre exclusion (`is_excluded_by_genre`, `EXCLUDED_GENRES`). No defaults on the rating check — caller owns policy.
 - `notify.py` — Markdown writer + SMTP sender. Port 587 + STARTTLS only.
 - `main.py` — CLI orchestrator. Enriches passing books only (saves requests).
 
@@ -34,6 +34,7 @@ Five-phase pipeline: *fetch* (Goodreads) → *dedup* (SQLite) → *enrich* (deta
 - **Dedup is permanent.** All books logged after enrichment; reappear only via `--recheck` for stale failures (90+ days).
 - **ISBN fallback.** Missing ISBN → `hash:` prefix key using truncated SHA-256(normalized title+author).
 - **Enrichment is best-effort.** Per-book crashes logged, not fatal.
+- **Genre exclusion runs after enrichment (Phase 4c).** `EXCLUDED_GENRES` (case-insensitive substring) drops matching books from the shortlist and re-logs them `passed_filter=0` so they also leave the catalog + digest but stay deduped. Untagged books are kept (rating-based feed). Currently excludes `romance`, `romantasy`.
 - **SMTP config env-only.** No hardcoded values; rejects missing secrets with clear error.
 
 ## CI/Deploy

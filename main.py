@@ -16,7 +16,7 @@ from pathlib import Path
 
 from db import get_conn, is_seen, log_book, get_books_for_recheck, get_all_catalog_books, get_books_missing_genres
 from scraper import Book, fetch_new_releases, enrich_book
-from filters import passes_filter
+from filters import passes_filter, is_excluded_by_genre
 from notify import write_shortlist, send_email, write_catalog
 
 logging.basicConfig(
@@ -191,6 +191,39 @@ def run(
                     )
                     if hit:
                         passed.append(b)
+
+        # --- Phase 4c: Genre exclusion ---
+        # The rating filter is genre-blind. Drop books tagged with an excluded
+        # genre (e.g. Romance) so they leave the shortlist, catalog, and digest.
+        # Books with no detected genres are kept (broad rating-based feed).
+        # Excluded books are re-logged as passed_filter=False: they stay "seen"
+        # (so they won't reappear weekly) but drop out of every passed_filter=1
+        # query (catalog webpage + monthly digest).
+        kept: list[Book] = []
+        excluded_count = 0
+        for book in passed:
+            if is_excluded_by_genre(book):
+                excluded_count += 1
+                logger.info("Excluding %r by genre: %s", book.title, ", ".join(book.genre_tags))
+                log_book(
+                    conn,
+                    title=book.title,
+                    author=book.author,
+                    isbn13=book.isbn13,
+                    goodreads_id=book.goodreads_id,
+                    pub_date=book.pub_date,
+                    rating=book.rating,
+                    rating_count=book.rating_count,
+                    passed_filter=False,
+                    genre_tags=", ".join(book.genre_tags) if book.genre_tags else None,
+                    goodreads_url=book.goodreads_url,
+                    description=book.description,
+                )
+            else:
+                kept.append(book)
+        if excluded_count:
+            logger.info("Genre exclusion removed %d book(s); %d remain", excluded_count, len(kept))
+        passed = kept
 
         # --- Phase 5: Output ---
         shortlist_path = write_shortlist(passed, today)
