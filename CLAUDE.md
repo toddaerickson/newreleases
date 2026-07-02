@@ -34,7 +34,7 @@ Five-phase pipeline: *fetch* (Goodreads) → *dedup* (SQLite) → *enrich* (deta
 - **Dedup is permanent.** All books logged after enrichment; reappear only via `--recheck` for stale failures (90+ days).
 - **ISBN fallback.** Missing ISBN → `hash:` prefix key using truncated SHA-256(normalized title+author).
 - **Enrichment is best-effort.** Per-book crashes logged, not fatal.
-- **Genre exclusion runs after enrichment (Phase 4c).** `EXCLUDED_GENRES` (case-insensitive substring) drops matching books from the shortlist and re-logs them `passed_filter=0` so they also leave the catalog + digest but stay deduped. Untagged books are kept (rating-based feed). Currently excludes `romance`, `romantasy`.
+- **Genre exclusion runs after enrichment (Phase 4c).** `EXCLUDED_GENRES` (case-insensitive substring) drops matching books from the shortlist and re-logs them `passed_filter=0` so they also leave the catalog + digest but stay deduped. Untagged books are kept (rating-based feed). Currently excludes `romance`, `romantasy`, `erotica`, `rom com`, `romantic comedy`.
 - **SMTP config env-only.** No hardcoded values; rejects missing secrets with clear error.
 
 ## CI/Deploy

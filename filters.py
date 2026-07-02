@@ -5,7 +5,9 @@ from scraper import Book
 # Genres excluded regardless of rating (case-insensitive substring match).
 # Substring match means "romance" also catches "Paranormal Romance",
 # "Historical Romance", "Dark Romance", etc.
-EXCLUDED_GENRES: tuple[str, ...] = ("romance", "romantasy")
+EXCLUDED_GENRES: tuple[str, ...] = (
+    "romance", "romantasy", "erotica", "rom com", "romantic comedy",
+)
 
 
 def passes_filter(
