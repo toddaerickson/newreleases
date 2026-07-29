@@ -35,7 +35,13 @@ BROWSE_URL = f"{BASE_URL}/browse"
 ALLOWED_HOSTS = {"app.thestorygraph.com", "thestorygraph.com"}
 
 # curl_cffi browser profile used to clear the Cloudflare challenge.
-IMPERSONATE = "chrome"
+#
+# This rots: Cloudflare eventually starts rejecting a given fingerprint and every
+# fetch 403s, which looks exactly like "no new books this week". Verified
+# 2026-07-29: every chrome/safari/android profile returned 403 "Just a moment...",
+# firefox135 returned 200. When StoryGraph starts 403-ing again, try the newer
+# profiles in `curl_cffi.requests.impersonate` before assuming the site changed.
+IMPERSONATE = "firefox135"
 
 REQUEST_DELAY = 2.0  # base seconds between requests, matching the Goodreads scraper
 DEFAULT_MAX_PAGES = 10  # browse pages to scan per run (~10 books/page)
