@@ -45,17 +45,23 @@ A single 429 or 5xx response causes that month's entire new-release page to be s
 
 *Fix:* Add exponential backoff with 2-3 retries for 429 and 5xx responses in `_get()`. Log the retry count. Abort the run if more than N pages fail consecutively (indicates a systemic block).
 
-**6. Email subject hardcodes "4.3" threshold**
+**6. Email subject hardcodes "4.3" threshold** — ✅ RESOLVED
 
-`notify.py` line 89 has `"over 4.3"` baked into the email subject. If the `--min-rating` flag is changed, the subject lies.
+The threshold was removed from the subject entirely rather than interpolated: the
+feed is a union of per-source bars, so no single number describes every book in
+it. The applied thresholds are stated in the email footer, interpolated from the
+`filters.py` constants. All thresholds now live in `filters.py`
+(`GOODREADS_MIN_RATING` etc.) and every report site reads them from there, so the
+drift class is closed, not just this instance.
 
-*Fix:* Pass `min_rating` as a parameter to `send_email()` and interpolate it into the subject.
+**7. No monitoring or alerting on silent failures** — ✅ RESOLVED
 
-**7. No monitoring or alerting on silent failures**
-
-If the entire run produces 0 candidates (Goodreads blocked, selectors broken, network down), the workflow succeeds with exit code 0 and commits an empty shortlist. There is no alert.
-
-*Fix:* Add a post-run check: if candidates == 0 AND the run completed without errors, send a warning email or fail the workflow step. Zero candidates on a 90-day window is almost certainly a scraper failure, not a legitimate result.
+A zero-candidate Goodreads fetch now logs an error and sets `scraper_alarm`, and
+`run()` exits 1 at the very end — after the shortlist, catalog, and email are
+written, so a Goodreads outage still delivers whatever StoryGraph found instead of
+costing a whole week's feed. The non-zero exit turns the weekly Actions run red,
+which is the alert. A zero-candidate StoryGraph fetch logs an error but does not
+fail the run, since its browse coverage is genuinely patchy.
 
 **8. GitHub Actions dependencies pinned to mutable tags**
 

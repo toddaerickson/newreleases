@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "seen_books.db"
 
+# NOTE: get_conn splits this on ";" and executes each fragment, so a semicolon
+# inside a comment or string literal would shred the statement and raise a fatal
+# RuntimeError. Keep the DDL free of inline comments and literal semicolons.
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS seen_books (
     isbn13          TEXT PRIMARY KEY,
@@ -29,11 +32,29 @@ CREATE TABLE IF NOT EXISTS seen_books (
     description     TEXT,
     source          TEXT DEFAULT 'goodreads',
     storygraph_url  TEXT,
+    google_books_url TEXT,
     notes           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_title_author
     ON seen_books(LOWER(title), LOWER(author));
+
+CREATE TABLE IF NOT EXISTS award_winners (
+    award_key       TEXT PRIMARY KEY,
+    award_name      TEXT NOT NULL,
+    award_year      INTEGER NOT NULL,
+    category        TEXT,
+    title           TEXT NOT NULL,
+    author          TEXT NOT NULL DEFAULT '',
+    listed_date     DATE NOT NULL,
+    genre_tags      TEXT,
+    goodreads_url   TEXT,
+    goodreads_rating REAL,
+    goodreads_rating_count INTEGER,
+    storygraph_url  TEXT,
+    storygraph_rating REAL,
+    storygraph_rating_count INTEGER
+);
 """
 
 # Migrations for existing databases (safe to re-run; errors are swallowed)
@@ -41,6 +62,7 @@ MIGRATIONS = [
     "ALTER TABLE seen_books ADD COLUMN description TEXT",
     "ALTER TABLE seen_books ADD COLUMN source TEXT DEFAULT 'goodreads'",
     "ALTER TABLE seen_books ADD COLUMN storygraph_url TEXT",
+    "ALTER TABLE seen_books ADD COLUMN google_books_url TEXT",
 ]
 
 
@@ -126,6 +148,7 @@ def log_book(
     description: str | None = None,
     source: str = "goodreads",
     storygraph_url: str | None = None,
+    google_books_url: str | None = None,
     notes: str | None = None,
 ) -> None:
     """Insert or update a book in the seen log."""
@@ -160,10 +183,11 @@ def log_book(
                        passed_filter = ?, genre_tags = COALESCE(?, genre_tags),
                        description = COALESCE(?, description),
                        source = COALESCE(?, source),
-                       storygraph_url = COALESCE(?, storygraph_url)
+                       storygraph_url = COALESCE(?, storygraph_url),
+                       google_books_url = COALESCE(?, google_books_url)
                  WHERE isbn13 = ?""",
                 (today, rating, rating_count, passed_filter, genre_tags, description,
-                 source, storygraph_url, key),
+                 source, storygraph_url, google_books_url, key),
             )
         else:
             conn.execute(
@@ -173,15 +197,15 @@ def log_book(
                     first_rating, first_rating_count,
                     last_rating, last_rating_count,
                     passed_filter, genre_tags, goodreads_url, description,
-                    source, storygraph_url, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    source, storygraph_url, google_books_url, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     key, goodreads_id, title, author, pub_date,
                     today, today,
                     rating, rating_count,
                     rating, rating_count,
                     passed_filter, genre_tags, goodreads_url, description,
-                    source, storygraph_url, notes,
+                    source, storygraph_url, google_books_url, notes,
                 ),
             )
         conn.commit()
@@ -223,7 +247,7 @@ def get_all_catalog_books(conn: sqlite3.Connection) -> list[dict]:
                   first_rating, first_rating_count,
                   last_rating, last_rating_count,
                   genre_tags, goodreads_url, description,
-                  source, storygraph_url
+                  source, storygraph_url, google_books_url
            FROM seen_books
            WHERE passed_filter = 1
            ORDER BY first_seen_date DESC, title ASC"""
@@ -238,7 +262,7 @@ def get_digest_books(conn: sqlite3.Connection, days: int = 30) -> list[dict]:
                   first_seen_date, last_rating AS rating,
                   last_rating_count AS rating_count,
                   genre_tags, goodreads_url,
-                  source, storygraph_url
+                  source, storygraph_url, google_books_url
            FROM seen_books
            WHERE passed_filter = 1
              AND first_seen_date >= date('now', ? || ' days')
@@ -246,3 +270,70 @@ def get_digest_books(conn: sqlite3.Connection, days: int = 30) -> list[dict]:
         (f"-{days}",),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --- Award winners -----------------------------------------------------------
+# Award winners live in their own table, NOT in seen_books. An award is an
+# announcement event, not a new release: most prizes honour previous-year books,
+# so a winner is usually already a seen_books row (as shown or as filtered-out)
+# and would be silently suppressed by is_seen / _name_suppressed / passes_filter.
+# Keeping them separate also means the catalog and digest queries, which are all
+# "FROM seen_books WHERE passed_filter = 1", cannot pick award rows up.
+
+
+def count_award_rows(conn: sqlite3.Connection) -> int:
+    """Total award winners on record. Zero means this is a first run (auto-seed)."""
+    return conn.execute("SELECT COUNT(*) FROM award_winners").fetchone()[0]
+
+
+def award_seen(conn: sqlite3.Connection, award_key: str) -> bool:
+    """Return True if this award winner has already been listed."""
+    row = conn.execute(
+        "SELECT 1 FROM award_winners WHERE award_key = ?", (award_key,)
+    ).fetchone()
+    return row is not None
+
+
+def log_award_winner(
+    conn: sqlite3.Connection,
+    *,
+    award_key: str,
+    award_name: str,
+    award_year: int,
+    category: str | None,
+    title: str,
+    author: str = "",
+    genre_tags: str | None = None,
+    goodreads_url: str | None = None,
+    goodreads_rating: float | None = None,
+    goodreads_rating_count: int | None = None,
+    storygraph_url: str | None = None,
+    storygraph_rating: float | None = None,
+    storygraph_rating_count: int | None = None,
+) -> None:
+    """Record an award winner as listed.
+
+    DO NOTHING on conflict, deliberately: the source pages are static and re-serve
+    the same winners on every run of the year, so an upsert that refreshed
+    listed_date would re-list every winner every week.
+    """
+    try:
+        conn.execute(
+            """INSERT INTO award_winners
+                 (award_key, award_name, award_year, category, title, author,
+                  listed_date, genre_tags,
+                  goodreads_url, goodreads_rating, goodreads_rating_count,
+                  storygraph_url, storygraph_rating, storygraph_rating_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(award_key) DO NOTHING""",
+            (
+                award_key, award_name, award_year, category or None,
+                title.strip(), author.strip(), date.today().isoformat(), genre_tags,
+                goodreads_url, goodreads_rating, goodreads_rating_count,
+                storygraph_url, storygraph_rating, storygraph_rating_count,
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        logger.error("Failed to log award winner %r: %s", title, e)

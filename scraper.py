@@ -51,7 +51,13 @@ HEADERS = {
 REQUEST_DELAY = 2.0  # base seconds between requests to avoid rate-limiting
 
 GOODREADS_NEW_RELEASES_URL = "https://www.goodreads.com/book/popular_by_date/{year}/{month}"
+
+# /search is behind an AWS WAF JS challenge (HTTP 202 + gokuProps) that neither
+# plain requests nor curl_cffi TLS impersonation can pass, so search_and_enrich
+# below cannot work. The undocumented autocomplete endpoint still returns plain
+# JSON and is what the award-winner lookup uses to resolve a title to a book id.
 GOODREADS_SEARCH_URL = "https://www.goodreads.com/search"
+GOODREADS_AUTOCOMPLETE_URL = "https://www.goodreads.com/book/auto_complete"
 
 ALLOWED_HOSTS = {"www.goodreads.com", "goodreads.com"}
 
@@ -83,12 +89,16 @@ class Book:
     source: str = "goodreads"
     storygraph_url: str | None = None
     storygraph_id: str | None = None
+    google_books_url: str | None = None
+    google_books_id: str | None = None
 
 
 def book_link(book: Book) -> str | None:
     """Return the canonical link for a book, based on its source."""
     if book.source == "storygraph":
         return book.storygraph_url
+    if book.source == "google_books":
+        return book.google_books_url
     return book.goodreads_url
 
 
@@ -155,6 +165,83 @@ def _get(url: str, params: dict | None = None) -> BeautifulSoup | None:
 def _polite_sleep() -> None:
     """Sleep with jitter to avoid bot fingerprinting."""
     time.sleep(REQUEST_DELAY + random.uniform(0, 1.0))
+
+
+def _get_json(url: str, params: dict | None = None) -> list | dict | None:
+    """Fetch a Goodreads JSON endpoint, or None on failure.
+
+    Separate from _get because the response is JSON, not HTML, which also gives a
+    cheap block detector: the AWS WAF challenge answers with an HTML body (and
+    HTTP 202), so "this did not parse as JSON" means "we got challenged", not
+    "no results". _get cannot tell the difference — the challenge page's <title>
+    is empty, so _is_challenge_page never fires on it.
+    """
+    if not _is_allowed_url(url):
+        logger.warning("Refusing to fetch non-Goodreads URL: %s", url)
+        return None
+    try:
+        resp = _session.get(url, params=params, timeout=(5, 15))
+        resp.raise_for_status()
+        try:
+            return resp.json()
+        except ValueError:
+            logger.error(
+                "%s returned non-JSON (HTTP %d) — likely an AWS WAF/bot challenge",
+                url, resp.status_code,
+            )
+            return None
+    except requests.RequestException as e:
+        logger.warning("Failed to fetch %s: %s", url, e)
+        return None
+
+
+def search_goodreads_candidates(title: str, author: str = "") -> list[dict]:
+    """Return autocomplete candidates for a title, as normalised dicts.
+
+    Resolution only. The endpoint's own avgRating/ratingsCount are not
+    trustworthy as final values (observed 400 ratings for a book with 339,042),
+    so callers use the returned goodreads_url/goodreads_id to fetch the real
+    numbers via enrich_book. avgRating IS used to reject phantom editions, which
+    report exactly 0.
+    """
+    query = f"{title} {author}".strip()
+    payload = _get_json(GOODREADS_AUTOCOMPLETE_URL, params={"format": "json", "q": query})
+    _polite_sleep()
+    if not isinstance(payload, list):
+        return []
+
+    candidates: list[dict] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        book_url = item.get("bookUrl") or ""
+        if not isinstance(book_url, str) or not book_url:
+            continue
+        # bookUrl is relative; _is_allowed_url requires an https URL with a
+        # Goodreads netloc, so a relative path would be refused by _get.
+        full_url = (
+            f"https://www.goodreads.com{book_url}" if book_url.startswith("/") else book_url
+        )
+        full_url = full_url.split("?")[0]
+        gr_id_match = re.search(r"/book/show/(\d+)", full_url)
+        author_obj = item.get("author") or {}
+        try:
+            rating = float(item.get("avgRating"))
+        except (TypeError, ValueError):
+            rating = None
+        try:
+            rating_count = int(item.get("ratingsCount"))
+        except (TypeError, ValueError):
+            rating_count = None
+        candidates.append({
+            "title": item.get("bookTitleBare") or item.get("title") or "",
+            "author": author_obj.get("name", "") if isinstance(author_obj, dict) else "",
+            "goodreads_url": full_url,
+            "goodreads_id": gr_id_match.group(1) if gr_id_match else None,
+            "rating": rating,
+            "rating_count": rating_count,
+        })
+    return candidates
 
 
 def _extract_books_from_apollo(soup: BeautifulSoup) -> list[Book]:
