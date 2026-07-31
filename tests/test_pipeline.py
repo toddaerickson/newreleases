@@ -258,3 +258,83 @@ def test_skip_awards_bypasses_the_scan(pipeline, monkeypatch):
     ]
     run_pipeline(skip_storygraph=True, skip_awards=True)
     assert called == []
+
+
+# --- Source outage reporting -------------------------------------------------
+# A dead source is indistinguishable from a quiet week: the section reads "(0)",
+# every other filter still runs, and the run looks normal. These pin that the
+# outage is named in the output and that the rest of the pipeline carries on.
+
+
+def test_dead_goodreads_is_named_in_the_shortlist(pipeline, tmp_path):
+    pipeline["storygraph"] = [
+        Book(title="SG Pick", author="A", rating=4.5, rating_count=900,
+             source="storygraph", storygraph_url="https://storygraph.example/1"),
+    ]
+    run_pipeline()
+    text = _today_shortlist(tmp_path)
+    assert "Goodreads returned no results" in text
+    assert "The StoryGraph" not in text.split("\n")[1]  # only Goodreads flagged
+    assert "SG Pick" in text  # the other source still delivered
+
+
+def test_dead_storygraph_is_named_but_does_not_fail_the_run(pipeline, tmp_path):
+    pipeline["goodreads"] = [
+        Book(title="GR Pick", author="A", rating=4.5, rating_count=900, isbn13="978"),
+    ]
+    # StoryGraph enabled but returning nothing.
+    assert run_pipeline() == 0  # StoryGraph alone must not turn the run red
+    text = _today_shortlist(tmp_path)
+    assert "The StoryGraph returned no results" in text
+    assert "GR Pick" in text
+
+
+def test_both_sources_dead_reports_both(pipeline, tmp_path):
+    assert run_pipeline() == 1  # Goodreads still drives the exit code
+    text = _today_shortlist(tmp_path)
+    assert "Goodreads and The StoryGraph returned no results" in text
+
+
+def test_no_warning_when_both_sources_deliver(pipeline, tmp_path):
+    pipeline["goodreads"] = [
+        Book(title="GR Pick", author="A", rating=4.5, rating_count=900, isbn13="978"),
+    ]
+    pipeline["storygraph"] = [
+        Book(title="SG Pick", author="B", rating=4.5, rating_count=900,
+             source="storygraph", storygraph_url="https://storygraph.example/1"),
+    ]
+    assert run_pipeline() == 0
+    assert "returned no results" not in _today_shortlist(tmp_path)
+
+
+def test_skipped_storygraph_is_not_reported_as_down(pipeline, tmp_path):
+    # --skip-storygraph is a choice, not an outage.
+    pipeline["goodreads"] = [
+        Book(title="GR Pick", author="A", rating=4.5, rating_count=900, isbn13="978"),
+    ]
+    run_pipeline(skip_storygraph=True)
+    assert "StoryGraph returned no results" not in _today_shortlist(tmp_path)
+
+
+def test_outage_emails_even_when_nothing_passed(pipeline, monkeypatch):
+    # Goodreads dead and nothing else to show: without this the run sends no mail
+    # at all, which is exactly the silence the warning exists to break.
+    sent: list = []
+    monkeypatch.setattr(main, "send_email",
+                        lambda *a, **kw: sent.append(kw) or True)
+    # Goodreads down still exits 1; the email must already have gone out by then.
+    with pytest.raises(SystemExit):
+        main.run(recipient="nobody@example.com", skip_storygraph=True)
+    assert len(sent) == 1
+    assert sent[0]["down_sources"] == ["Goodreads"]
+
+
+def test_no_email_when_quiet_and_all_sources_healthy(pipeline, monkeypatch):
+    sent: list = []
+    monkeypatch.setattr(main, "send_email",
+                        lambda *a, **kw: sent.append(kw) or True)
+    pipeline["goodreads"] = [
+        Book(title="Low Rated", author="A", rating=3.0, rating_count=900, isbn13="978"),
+    ]
+    main.run(recipient="nobody@example.com", skip_storygraph=True)
+    assert sent == []

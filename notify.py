@@ -18,7 +18,10 @@ from filters import (
 )
 from scraper import Book, book_link
 
+logger = logging.getLogger(__name__)
+
 CATALOG_URL = "https://toddaerickson.github.io/newreleases/"
+SHORTLISTS_DIR = Path(__file__).parent / "shortlists"
 
 # Display name per Book.source value. Used for link labels in the shortlist and
 # email, and for the catalog's Source column.
@@ -33,6 +36,49 @@ def _source_label(source: str | None) -> str:
     return SOURCE_LABELS.get(source or "goodreads", "Goodreads")
 
 
+def _outage_message(down_sources: list[str]) -> str:
+    """The bare warning sentence, with no per-format decoration.
+
+    A source that returns nothing looks exactly like a quiet week — the affected
+    section just reads "(0)" and everything else still works — so the outage has
+    to be stated outright, at the top, in every output format.
+    """
+    if not down_sources:
+        return ""
+    if len(down_sources) == 1:
+        names, subject = down_sources[0], "it is"
+    elif len(down_sources) == 2:
+        names, subject = " and ".join(down_sources), "they are"
+    else:
+        names = ", ".join(down_sources[:-1]) + ", and " + down_sources[-1]
+        subject = "they are"
+    return (
+        f"{names} returned no results — {subject} likely down or blocked. "
+        "The picks below are from the remaining sources only."
+    )
+
+
+def _outage_banner_html(down_sources: list[str]) -> str:
+    """Bold red first line of the email.
+
+    Inline styles only: mail clients drop <style> blocks, and several ignore
+    class attributes entirely.
+    """
+    message = _outage_message(down_sources)
+    if not message:
+        return ""
+    return (
+        '<p style="color:#cf222e;font-weight:bold;font-size:1.05em;margin:0 0 1rem">'
+        f"⚠ {html.escape(message)}</p>"
+    )
+
+
+def _outage_banner_text(down_sources: list[str]) -> str:
+    """Plaintext first line. No formatting available, so it leads with '!!!'."""
+    message = _outage_message(down_sources)
+    return f"!!! WARNING: {message}" if message else ""
+
+
 def _rating_cell(rating: float | None, count: int | None) -> str:
     """Render "4.35 (1,204)", degrading gracefully when either half is missing."""
     if rating is None:
@@ -40,10 +86,6 @@ def _rating_cell(rating: float | None, count: int | None) -> str:
     if count is None:
         return f"{rating:.2f}"
     return f"{rating:.2f} ({count:,})"
-
-logger = logging.getLogger(__name__)
-
-SHORTLISTS_DIR = Path(__file__).parent / "shortlists"
 
 
 def _format_book_entry(i: int, book: Book, markdown: bool = True) -> str:
@@ -88,10 +130,17 @@ def _format_award_entry(i: int, winner, markdown: bool = True) -> str:
     honest than omitting the line.
     """
     genres = ", ".join(winner.genre_tags) if winner.genre_tags else "—"
-    gr = _rating_cell(winner.goodreads_rating, winner.goodreads_rating_count)
-    sg = _rating_cell(winner.storygraph_rating, winner.storygraph_rating_count)
-    gr_line = f"{gr} — {winner.goodreads_url}" if winner.goodreads_url else gr
-    sg_line = f"{sg} — {winner.storygraph_url}" if winner.storygraph_url else sg
+
+    def _line(rating, count, url) -> str:
+        # The book can resolve while its rating does not (a lookup that 403s), so
+        # spell that case out rather than emitting "— — <url>".
+        text = "not found" if rating is None else _rating_cell(rating, count)
+        return f"{text} — {url}" if url else text
+
+    gr_line = _line(winner.goodreads_rating, winner.goodreads_rating_count,
+                    winner.goodreads_url)
+    sg_line = _line(winner.storygraph_rating, winner.storygraph_rating_count,
+                    winner.storygraph_url)
 
     if markdown:
         lines = [
@@ -121,6 +170,7 @@ def write_shortlist(
     google_books: list[Book] | None = None,
     award_winners: list | None = None,
     award_notes: list[str] | None = None,
+    down_sources: list[str] | None = None,
 ) -> Path:
     """Write a markdown shortlist file. Returns the file path.
 
@@ -138,10 +188,15 @@ def write_shortlist(
     google_books = google_books or []
     award_winners = award_winners or []
     award_notes = award_notes or []
+    down_sources = down_sources or []
     SHORTLISTS_DIR.mkdir(exist_ok=True)
     filepath = SHORTLISTS_DIR / f"shortlist_{run_date.isoformat()}.md"
 
     lines = [f"# New book shortlist — {run_date.isoformat()}\n"]
+    if down_sources:
+        # Above everything, so the committed shortlist records that this week's
+        # thin list was an outage rather than a quiet week.
+        lines.append(f"> **⚠ {_outage_message(down_sources)}**\n")
 
     if not books and not storygraph_books and not google_books:
         lines.append("No new books passed the filter this week.\n")
@@ -400,11 +455,16 @@ def send_email(
     min_rating_count: int = GOODREADS_MIN_COUNT,
     award_winners: list | None = None,
     award_notes: list[str] | None = None,
+    down_sources: list[str] | None = None,
 ) -> bool:
     """Send the shortlist as an email. Returns True on success.
 
     Each source's picks are shown as a separate section, with award winners as a
     final section that follows its own rules (no rating filter).
+
+    `down_sources` names sources that returned nothing they plausibly could; they
+    are called out in bold red on the first line, since the alternative is a feed
+    that looks merely quiet while half of it is dead.
 
     Uses Gmail SMTP with TLS (port 587). Requires a Gmail App Password
     (not a regular password) — 2FA must be enabled on the Google account.
@@ -414,6 +474,7 @@ def send_email(
     google_books = google_books or []
     award_winners = award_winners or []
     award_notes = award_notes or []
+    down_sources = down_sources or []
 
     smtp_host = os.environ.get("SMTP_HOST", "")
     smtp_user = os.environ.get("SMTP_USER", "")
@@ -462,8 +523,16 @@ def send_email(
             f"{award_suffix} — {run_date.isoformat()}"
         )
 
-    # Plain-text body — one section per source
-    plain_lines = [
+    # An outage email can otherwise arrive titled "0 new candidates", which reads
+    # as a quiet week and goes unopened — defeating the point of the warning.
+    if down_sources:
+        subject = f"⚠ {subject}"
+
+    # Plain-text body — one section per source, outage warning first
+    plain_lines = []
+    if down_sources:
+        plain_lines += [_outage_banner_text(down_sources), ""]
+    plain_lines += [
         f"New book shortlist — {run_date.isoformat()}",
         f"Full running list: {CATALOG_URL}",
         "",
@@ -573,6 +642,7 @@ def send_email(
 
     html_body = f"""<!DOCTYPE html>
 <html><body style="font-family:system-ui,sans-serif;max-width:700px;margin:0 auto;padding:1rem">
+{_outage_banner_html(down_sources)}
 <h2>New book shortlist — {run_date.isoformat()}</h2>
 <p><a href="{CATALOG_URL}">View the full running list with rating history →</a></p>
 <h3>From Goodreads ({len(books)})</h3>

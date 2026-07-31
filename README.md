@@ -238,7 +238,7 @@ newreleases/
 
 **`notify.py`** — Writes markdown shortlists to `shortlists/shortlist_YYYY-MM-DD.md`. Sends plaintext email via SMTP with STARTTLS (port 587, SSL context enforced). Includes proper `Date` and `Message-ID` headers. Validates recipients against header injection. Rejects port 465 (requires SMTP_SSL, not supported). SMTP config comes entirely from environment variables. Specific exception handling for auth failures vs. network errors vs. SMTP protocol errors. Also provides `send_digest_email()` for the monthly digest.
 
-**`main.py`** — Orchestrates the pipeline: fetch, dedup, enrich, filter, genre exclusion, cross-source reconciliation, award scan, output. All configuration via CLI args or env vars — no hardcoded values. Connection cleanup guaranteed via try/finally. A zero-candidate Goodreads fetch is treated as breakage rather than a quiet week: it logs an error and exits non-zero *after* the shortlist, catalog, and email are written, so a Goodreads outage still delivers what the other sources found while the Actions run goes red.
+**`main.py`** — Orchestrates the pipeline: fetch, dedup, enrich, filter, genre exclusion, cross-source reconciliation, award scan, output. All configuration via CLI args or env vars — no hardcoded values. Connection cleanup guaranteed via try/finally. See "Source outage reporting" below for how a dead source is surfaced.
 
 **`digest.py`** — Monthly digest entry point. Queries `seen_books` for books that passed the filter within a configurable lookback window (default 30 days) and emails a summary. Does not scrape or modify the database — read-only. CLI flags: `--days`, `--recipient`, `--skip-email`.
 
@@ -334,6 +334,28 @@ per-source bars, so no single number describes every book in it. The applied
 thresholds are stated in the email footer instead.
 
 Only sent when at least one book passes the filter.
+
+## Source outage reporting
+
+A scraping source that breaks does not fail loudly — it returns zero results. Its
+section reads "(0)", every other filter still runs, and the week looks quiet. That
+is how StoryGraph stayed silently dead for weeks.
+
+So a source that returns nothing it plausibly could is named in **bold red on the
+first line of the email**, above the shortlist, with a ⚠ prefix on the subject so
+the alert is visible without opening it. The same warning is written into the
+committed markdown, so the record shows the outage rather than a thin week. The
+remaining sources are unaffected and still deliver.
+
+| | Behaviour on zero results |
+|---|---|
+| **Goodreads** | Red banner in the email, **and** the run exits non-zero so the Actions run goes red. The exit happens *after* the shortlist, catalog, and email are written, so the outage never costs you the other sources' picks. |
+| **The StoryGraph** | Red banner only. Its browse coverage is genuinely patchy, and failing the run every thin week would train the signal to be ignored. |
+| `--skip-storygraph` | Nothing. Skipping a source is a choice, not an outage. |
+
+An outage sends mail **even when nothing passed the filters** — otherwise a week
+with a dead Goodreads and no other picks sends nothing at all, which is exactly
+the silence the warning exists to break.
 
 ## Filter tuning notes
 

@@ -7,7 +7,14 @@ kwarg surface it exposes to main.py is exactly what broke, so that is covered.
 import inspect
 import json
 
-from notify import send_email, write_catalog, write_shortlist
+from notify import (
+    _outage_banner_html,
+    _outage_banner_text,
+    _outage_message,
+    send_email,
+    write_catalog,
+    write_shortlist,
+)
 from scraper import Book, book_link
 
 
@@ -23,6 +30,53 @@ class TestBookLink:
             Book(title="T", author="A", source="storygraph", storygraph_url="sg")
         ) == "sg"
         assert book_link(gb(google_books_url="gbk")) == "gbk"
+
+
+class TestOutageBanner:
+    """A dead source looks exactly like a quiet week, so it has to be stated."""
+
+    def test_no_banner_when_everything_is_up(self):
+        assert _outage_message([]) == ""
+        assert _outage_banner_html([]) == ""
+        assert _outage_banner_text([]) == ""
+
+    def test_singular_verb_for_one_source(self):
+        assert "Goodreads returned no results — it is likely down" in _outage_message(["Goodreads"])
+
+    def test_plural_verb_for_two_sources(self):
+        message = _outage_message(["Goodreads", "The StoryGraph"])
+        assert "Goodreads and The StoryGraph" in message
+        assert "they are likely down" in message
+
+    def test_oxford_comma_for_three_or_more(self):
+        message = _outage_message(["A", "B", "C"])
+        assert "A, B, and C" in message
+
+    def test_html_banner_is_bold_and_red(self):
+        banner = _outage_banner_html(["Goodreads"])
+        assert "color:#cf222e" in banner
+        assert "font-weight:bold" in banner
+
+    def test_html_banner_escapes_its_input(self):
+        # Source names are internal constants today, but this renders into an
+        # email body — no path from a name to raw markup.
+        assert "<script>" not in _outage_banner_html(["<script>x</script>"])
+
+    def test_shortlist_leads_with_the_warning(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("notify.SHORTLISTS_DIR", tmp_path)
+        text = write_shortlist(
+            [Book(title="GR", author="A")], down_sources=["The StoryGraph"],
+        ).read_text(encoding="utf-8")
+        body = text.split("\n")
+        warning_line = next(i for i, ln in enumerate(body) if "⚠" in ln)
+        first_section = next(i for i, ln in enumerate(body) if ln.startswith("## "))
+        assert warning_line < first_section
+        assert "The StoryGraph" in text
+
+    def test_shortlist_has_no_warning_when_all_sources_are_up(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("notify.SHORTLISTS_DIR", tmp_path)
+        text = write_shortlist([Book(title="GR", author="A")]).read_text(encoding="utf-8")
+        assert "⚠" not in text
 
 
 class TestWriteShortlist:
@@ -90,7 +144,15 @@ class TestAwardSection:
         assert "3.94 (5,112)" in text
         # A winner with no ratings at all is still listed — the award is the signal.
         assert "Make Your Way Home" in text
-        assert "**StoryGraph:** —" in text
+        assert "**StoryGraph:** not found" in text
+
+    def test_resolved_book_with_no_rating_still_links(self, tmp_path, monkeypatch):
+        """A 403 on the rating fetch must not render "— — <url>"."""
+        monkeypatch.setattr("notify.SHORTLISTS_DIR", tmp_path)
+        w = self._winner(storygraph_url="https://sg/x")  # url resolved, rating did not
+        text = write_shortlist([], award_winners=[w]).read_text(encoding="utf-8")
+        assert "**StoryGraph:** not found — https://sg/x" in text
+        assert "— —" not in text
 
     def test_no_award_section_when_there_are_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr("notify.SHORTLISTS_DIR", tmp_path)
@@ -179,10 +241,12 @@ class TestSendEmailSignature:
         # with mail configured, i.e. once a week in CI.
         params = inspect.signature(send_email).parameters
         for name in ("storygraph_books", "google_books", "min_rating",
-                     "min_rating_count", "award_winners", "award_notes"):
+                     "min_rating_count", "award_winners", "award_notes",
+                     "down_sources"):
             assert name in params, name
 
     def test_write_shortlist_accepts_every_kwarg_main_passes(self):
         params = inspect.signature(write_shortlist).parameters
-        for name in ("storygraph_books", "google_books", "award_winners", "award_notes"):
+        for name in ("storygraph_books", "google_books", "award_winners",
+                     "award_notes", "down_sources"):
             assert name in params, name

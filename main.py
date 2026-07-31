@@ -248,6 +248,7 @@ def run(
     award_winners: list = []
     award_notes: list[str] = []
     scraper_alarm = False  # Set when a source returns nothing it plausibly could
+    down_sources: list[str] = []  # Named in bold red on the first line of the email
 
     if backfill:
         try:
@@ -281,6 +282,7 @@ def run(
                 "(markup change, Cloudflare block, or moved URL), not merely idle."
             )
             scraper_alarm = True
+            down_sources.append("Goodreads")
 
         sg_candidates: list[Book] = []
         if not skip_storygraph:
@@ -292,6 +294,11 @@ def run(
                     "StoryGraph returned 0 candidates — check the curl_cffi "
                     "impersonation profile (Cloudflare 403) before assuming no releases."
                 )
+                # Reported in the email but does NOT set scraper_alarm: StoryGraph's
+                # browse coverage is genuinely patchy, so a red run every time it is
+                # thin would train the failure signal to be ignored. The banner is
+                # the alert; the other sources carry on.
+                down_sources.append("The StoryGraph")
 
         gb_candidates: list[Book] = []
         if google_books:
@@ -540,6 +547,7 @@ def run(
         shortlist_path = write_shortlist(
             passed, today, storygraph_books=sg_passed, google_books=gb_passed,
             award_winners=award_winners, award_notes=award_notes,
+            down_sources=down_sources,
         )
         logger.info("Shortlist: %s", shortlist_path)
 
@@ -548,14 +556,20 @@ def run(
                       min_rating=min_rating, min_rating_count=min_rating_count)
         logger.info("Catalog updated (%d all-time books)", len(catalog_books))
 
-        if (passed or sg_passed or gb_passed or award_winners) and not skip_email:
+        # An outage is itself worth an email even when nothing passed: otherwise a
+        # week where Goodreads is dead and the other sources happen to be empty
+        # sends nothing at all, which is indistinguishable from a quiet week and
+        # is precisely the case the warning exists to surface.
+        have_content = bool(passed or sg_passed or gb_passed or award_winners)
+        if (have_content or down_sources) and not skip_email:
             if not send_email(passed, recipient, today, min_rating=min_rating,
                               min_rating_count=min_rating_count,
                               storygraph_books=sg_passed, google_books=gb_passed,
-                              award_winners=award_winners, award_notes=award_notes):
+                              award_winners=award_winners, award_notes=award_notes,
+                              down_sources=down_sources):
                 logger.error("Email delivery failed — failing the run.")
                 sys.exit(1)
-        elif not passed and not sg_passed and not gb_passed and not award_winners:
+        elif not have_content:
             logger.info("Nothing to report this week — no email sent.")
 
     finally:
