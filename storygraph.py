@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://app.thestorygraph.com"
 BROWSE_URL = f"{BASE_URL}/browse"
+SEARCH_URL = f"{BASE_URL}/search"
 ALLOWED_HOSTS = {"app.thestorygraph.com", "thestorygraph.com"}
 
 # curl_cffi browser profile used to clear the Cloudflare challenge.
@@ -255,6 +256,94 @@ def fetch_storygraph_new_releases(
     logger.info("Found %d StoryGraph candidate releases in trailing %d days",
                 len(books), window_days)
     return books
+
+
+_UUID_RE = re.compile(
+    r"^/books/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _parse_search_item(anchor) -> tuple[str, str]:
+    """Return (title, author) for one search hit, or ("", "") if unreadable.
+
+    A hit renders as::
+
+        <li class="book-list-item">
+          <h1 class="sr-only">Title by Author</h1>
+          <a href="/books/<uuid>">
+            <img alt="Title by Author">
+            <h1><span class="list-option-text">Title</span></h1>   (twice: md/mobile)
+            <h2 class="list-option-text">Author</h2>
+          </a>
+        </li>
+
+    so a plain get_text() on the anchor yields the title two or three times over.
+    There is no /authors/ link to lean on. Falls back to splitting the screen-
+    reader heading on " by " when the classes change.
+
+    An empty author is meaningful: callers must not guess a match without one.
+    """
+    title_el = anchor.select_one("h1 span.list-option-text, h1 span")
+    author_el = anchor.select_one("h2.list-option-text, h2")
+    title = title_el.get_text(" ", strip=True) if title_el else ""
+    author = author_el.get_text(" ", strip=True) if author_el else ""
+    if title:
+        return title, author
+
+    parent = anchor.find_parent(["li", "div"])
+    heading = parent.select_one("h1.sr-only") if parent else None
+    label = heading.get_text(" ", strip=True) if heading else (anchor.get("title") or "")
+    if not label:
+        img = anchor.find("img")
+        label = (img.get("alt") or "") if img else ""
+    label = re.sub(r"\s+", " ", label).strip()
+    if " by " in label:
+        head, _, tail = label.rpartition(" by ")
+        return head.strip(), tail.strip()
+    return label, ""
+
+
+def search_storygraph_candidates(title: str, max_results: int = 8) -> list[dict]:
+    """Return StoryGraph search hits for a title as {title, author, storygraph_id}.
+
+    Used by the award-winner lookup, which starts from a title+author string and
+    has no StoryGraph uuid. Deliberately does NOT reuse _parse_pane: that applies
+    a publication-date recency gate, and award winners are usually previous-year
+    books, so every one of them would be discarded.
+    """
+    from bs4 import BeautifulSoup
+
+    html = _get(SEARCH_URL, params={"search_term": title})
+    _polite_sleep()
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    candidates: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for anchor in soup.select("a[href^='/books/']"):
+        href = anchor.get("href") or ""
+        m = _UUID_RE.match(href)
+        if not m:
+            continue  # skips /editions, /reviews, and other sub-pages
+        book_id = m.group(1)
+        if book_id in seen_ids:
+            continue
+        cand_title, author = _parse_search_item(anchor)
+        if not cand_title:
+            continue
+        seen_ids.add(book_id)
+        candidates.append({
+            "title": cand_title,
+            "author": author,
+            "storygraph_id": book_id,
+            "storygraph_url": f"{BASE_URL}/books/{book_id}",
+        })
+        if len(candidates) >= max_results:
+            break
+
+    return candidates
 
 
 def enrich_storygraph_book(book: Book) -> Book:

@@ -34,6 +34,7 @@ def _dict_to_book(row: dict) -> Book:
         genre_tags=genres,
         source=row.get("source") or "goodreads",
         storygraph_url=row.get("storygraph_url"),
+        google_books_url=row.get("google_books_url"),
     )
 
 

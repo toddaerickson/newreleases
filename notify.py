@@ -12,13 +12,80 @@ from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 
+from filters import (
+    GOODREADS_MIN_RATING, GOODREADS_MIN_COUNT,
+    STORYGRAPH_MIN_RATING, STORYGRAPH_MIN_COUNT,
+)
 from scraper import Book, book_link
-
-CATALOG_URL = "https://toddaerickson.github.io/newreleases/"
 
 logger = logging.getLogger(__name__)
 
+CATALOG_URL = "https://toddaerickson.github.io/newreleases/"
 SHORTLISTS_DIR = Path(__file__).parent / "shortlists"
+
+# Display name per Book.source value. Used for link labels in the shortlist and
+# email, and for the catalog's Source column.
+SOURCE_LABELS = {
+    "goodreads": "Goodreads",
+    "storygraph": "StoryGraph",
+    "google_books": "Google Books",
+}
+
+
+def _source_label(source: str | None) -> str:
+    return SOURCE_LABELS.get(source or "goodreads", "Goodreads")
+
+
+def _outage_message(down_sources: list[str]) -> str:
+    """The bare warning sentence, with no per-format decoration.
+
+    A source that returns nothing looks exactly like a quiet week — the affected
+    section just reads "(0)" and everything else still works — so the outage has
+    to be stated outright, at the top, in every output format.
+    """
+    if not down_sources:
+        return ""
+    if len(down_sources) == 1:
+        names, subject = down_sources[0], "it is"
+    elif len(down_sources) == 2:
+        names, subject = " and ".join(down_sources), "they are"
+    else:
+        names = ", ".join(down_sources[:-1]) + ", and " + down_sources[-1]
+        subject = "they are"
+    return (
+        f"{names} returned no results — {subject} likely down or blocked. "
+        "The picks below are from the remaining sources only."
+    )
+
+
+def _outage_banner_html(down_sources: list[str]) -> str:
+    """Bold red first line of the email.
+
+    Inline styles only: mail clients drop <style> blocks, and several ignore
+    class attributes entirely.
+    """
+    message = _outage_message(down_sources)
+    if not message:
+        return ""
+    return (
+        '<p style="color:#cf222e;font-weight:bold;font-size:1.05em;margin:0 0 1rem">'
+        f"⚠ {html.escape(message)}</p>"
+    )
+
+
+def _outage_banner_text(down_sources: list[str]) -> str:
+    """Plaintext first line. No formatting available, so it leads with '!!!'."""
+    message = _outage_message(down_sources)
+    return f"!!! WARNING: {message}" if message else ""
+
+
+def _rating_cell(rating: float | None, count: int | None) -> str:
+    """Render "4.35 (1,204)", degrading gracefully when either half is missing."""
+    if rating is None:
+        return "—"
+    if count is None:
+        return f"{rating:.2f}"
+    return f"{rating:.2f} ({count:,})"
 
 
 def _format_book_entry(i: int, book: Book, markdown: bool = True) -> str:
@@ -29,7 +96,7 @@ def _format_book_entry(i: int, book: Book, markdown: bool = True) -> str:
     pub_str = book.pub_date or "Unknown"
 
     link = book_link(book)
-    link_label = "StoryGraph" if book.source == "storygraph" else "Goodreads"
+    link_label = _source_label(book.source)
 
     if markdown:
         lines = [
@@ -55,23 +122,83 @@ def _format_book_entry(i: int, book: Book, markdown: bool = True) -> str:
     return "\n".join(lines)
 
 
+def _format_award_entry(i: int, winner, markdown: bool = True) -> str:
+    """Format one award winner. Mirrors _format_book_entry's two output modes.
+
+    Both ratings are always shown, blank included: "if available" means a missing
+    rating is normal output, not an error, and an explicit "not found" is more
+    honest than omitting the line.
+    """
+    genres = ", ".join(winner.genre_tags) if winner.genre_tags else "—"
+
+    def _line(rating, count, url) -> str:
+        # The book can resolve while its rating does not (a lookup that 403s), so
+        # spell that case out rather than emitting "— — <url>".
+        text = "not found" if rating is None else _rating_cell(rating, count)
+        return f"{text} — {url}" if url else text
+
+    gr_line = _line(winner.goodreads_rating, winner.goodreads_rating_count,
+                    winner.goodreads_url)
+    sg_line = _line(winner.storygraph_rating, winner.storygraph_rating_count,
+                    winner.storygraph_url)
+
+    if markdown:
+        lines = [
+            f"### {i}. {winner.title} — {winner.author}\n",
+            f"- **Award:** {winner.award_label}",
+            f"- **Goodreads:** {gr_line}",
+            f"- **StoryGraph:** {sg_line}",
+            f"- **Genres:** {genres}",
+            "",
+        ]
+    else:
+        lines = [
+            f"{i}. {winner.title} — {winner.author}",
+            f"   Award: {winner.award_label}",
+            f"   Goodreads: {gr_line}",
+            f"   StoryGraph: {sg_line}",
+            f"   Genres: {genres}",
+            "",
+        ]
+    return "\n".join(lines)
+
+
 def write_shortlist(
     books: list[Book],
     run_date: date | None = None,
     storygraph_books: list[Book] | None = None,
+    google_books: list[Book] | None = None,
+    award_winners: list | None = None,
+    award_notes: list[str] | None = None,
+    down_sources: list[str] | None = None,
 ) -> Path:
     """Write a markdown shortlist file. Returns the file path.
 
-    Goodreads and StoryGraph picks are written as separate sections.
+    Each source's picks are written as a separate section. Goodreads always gets
+    a section (even when empty, so an empty week is visibly an empty week); the
+    secondary sources appear only when they contributed something.
+
+    Award winners are a separate list with its own rules (no rating filter, no
+    release window), so the section sits outside the release sections and is
+    emitted even when nothing passed the rating filter — which is the common
+    case, and exactly when the award list is the only content worth reading.
     """
     run_date = run_date or date.today()
     storygraph_books = storygraph_books or []
+    google_books = google_books or []
+    award_winners = award_winners or []
+    award_notes = award_notes or []
+    down_sources = down_sources or []
     SHORTLISTS_DIR.mkdir(exist_ok=True)
     filepath = SHORTLISTS_DIR / f"shortlist_{run_date.isoformat()}.md"
 
     lines = [f"# New book shortlist — {run_date.isoformat()}\n"]
+    if down_sources:
+        # Above everything, so the committed shortlist records that this week's
+        # thin list was an outage rather than a quiet week.
+        lines.append(f"> **⚠ {_outage_message(down_sources)}**\n")
 
-    if not books and not storygraph_books:
+    if not books and not storygraph_books and not google_books:
         lines.append("No new books passed the filter this week.\n")
     else:
         lines.append(f"## From Goodreads ({len(books)})\n")
@@ -81,19 +208,48 @@ def write_shortlist(
         else:
             lines.append("No new Goodreads books passed the filter this week.\n")
 
-        if storygraph_books:
-            lines.append(f"## From StoryGraph ({len(storygraph_books)})\n")
-            for i, book in enumerate(storygraph_books, 1):
+        for label, section_books in (
+            ("StoryGraph", storygraph_books),
+            ("Google Books", google_books),
+        ):
+            if not section_books:
+                continue
+            lines.append(f"## From {label} ({len(section_books)})\n")
+            for i, book in enumerate(section_books, 1):
                 lines.append(_format_book_entry(i, book, markdown=True))
+
+    if award_winners:
+        lines.append(f"## Award winners announced recently ({len(award_winners)})\n")
+        for i, winner in enumerate(award_winners, 1):
+            lines.append(_format_award_entry(i, winner, markdown=True))
+
+    if award_notes:
+        # Printed every week, healthy or not: a present, plausible counts line is
+        # what shows the award scan still ran. Zero blocks/rows means a source
+        # moved or changed shape, which no per-winner check can reveal, because
+        # "no new winners" is the normal result most weeks.
+        lines.append(f"> Sources: {' · '.join(award_notes)}\n")
 
     filepath.write_text("\n".join(lines), encoding="utf-8")
     logger.info("Wrote shortlist to %s", filepath)
     return filepath
 
 
-def write_catalog(books: list[dict], docs_dir: Path) -> None:
+def write_catalog(
+    books: list[dict],
+    docs_dir: Path,
+    min_rating: float = GOODREADS_MIN_RATING,
+    min_rating_count: int = GOODREADS_MIN_COUNT,
+) -> None:
     """Write docs/books.json and docs/index.html from all-time passed books."""
     docs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-source link column, so a StoryGraph or Google Books row links to the
+    # site it actually came from instead of falling back to a null goodreads_url.
+    link_columns = {
+        "storygraph": "storygraph_url",
+        "google_books": "google_books_url",
+    }
 
     # Compute delta and build serialisable records
     records = []
@@ -102,7 +258,7 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
         last = b.get("last_rating")
         delta = round(last - first, 3) if (first is not None and last is not None) else None
         source = b.get("source") or "goodreads"
-        link = b.get("storygraph_url") if source == "storygraph" else b.get("goodreads_url")
+        link = b.get(link_columns.get(source, "goodreads_url"))
         records.append({
             "title": b["title"],
             "author": b["author"],
@@ -113,7 +269,7 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
             "rating_last": last,
             "rating_count_last": b.get("last_rating_count"),
             "delta": delta,
-            "source": "StoryGraph" if source == "storygraph" else "Goodreads",
+            "source": _source_label(source),
             "link": link or "",
             # Keep the legacy key for backward compatibility with any external
             # consumer of the published books.json (Goodreads rows only).
@@ -122,14 +278,18 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
         })
 
     # Collapse cross-source duplicates: the same book can be logged under a
-    # StoryGraph hash key and later a Goodreads ISBN key, producing two rows for
-    # one title. Keep a single catalog entry per normalized title+author,
-    # preferring the Goodreads row (richer data; "prefer Goodreads on overlap").
+    # StoryGraph or Google Books hash/edition key and later a Goodreads ISBN key,
+    # producing several rows for one title. Keep a single catalog entry per
+    # normalized title+author, preferring the richest source (Goodreads first).
+    source_priority = {"Goodreads": 0, "StoryGraph": 1, "Google Books": 2}
     by_name: dict[tuple[str, str], dict] = {}
     for r in records:
         k = (r["title"].strip().lower(), r["author"].strip().lower())
         existing = by_name.get(k)
-        if existing is None or (existing["source"] == "StoryGraph" and r["source"] == "Goodreads"):
+        if existing is None or (
+            source_priority.get(r["source"], 99)
+            < source_priority.get(existing["source"], 99)
+        ):
             by_name[k] = r
     records = list(by_name.values())
 
@@ -151,14 +311,12 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
             f'{title_link}<br><small style="color:#666;font-weight:normal">{html.escape(desc_snippet)}</small>'
             if desc_snippet else title_link
         )
-        first_str = (
-            f"{r['rating_first']:.2f} ({r['rating_count_first']:,})"
-            if r["rating_first"] is not None else "—"
-        )
-        last_str = (
-            f"{r['rating_last']:.2f} ({r['rating_count_last']:,})"
-            if r["rating_last"] is not None else "—"
-        )
+        # rating and count are nullable independently: a row can carry a rating
+        # with no count (Apollo listing data), and formatting None with :, or :.2f
+        # raises TypeError — which would abort the whole run at output time, after
+        # every page has already been scraped.
+        first_str = _rating_cell(r["rating_first"], r["rating_count_first"])
+        last_str = _rating_cell(r["rating_last"], r["rating_count_last"])
         if r["delta"] is None:
             delta_cell = '<td title="Rating has not been updated since first recorded">—</td>'
         elif r["delta"] > 0:
@@ -226,7 +384,7 @@ def write_catalog(books: list[dict], docs_dir: Path) -> None:
 </head>
 <body>
 <h1>Top Book Releases</h1>
-<p class="meta">Goodreads books rated ≥4.1 with ≥500 ratings, or StoryGraph books rated &gt;4.0 with &gt;70 ratings. Updated weekly. Last updated: {updated}.</p>
+<p class="meta">Goodreads books rated ≥{min_rating} with ≥{min_rating_count:,} ratings, or StoryGraph books rated &gt;{STORYGRAPH_MIN_RATING} with &gt;{STORYGRAPH_MIN_COUNT} ratings. Updated weekly. Last updated: {updated}.</p>
 <div class="toolbar">
   <label for="gf">Filter by genre:</label>
   <select id="gf" onchange="filterGenre()">
@@ -291,18 +449,32 @@ def send_email(
     books: list[Book],
     recipient: str,
     run_date: date | None = None,
-    min_rating: float = 4.3,
+    min_rating: float = GOODREADS_MIN_RATING,
     storygraph_books: list[Book] | None = None,
+    google_books: list[Book] | None = None,
+    min_rating_count: int = GOODREADS_MIN_COUNT,
+    award_winners: list | None = None,
+    award_notes: list[str] | None = None,
+    down_sources: list[str] | None = None,
 ) -> bool:
     """Send the shortlist as an email. Returns True on success.
 
-    Goodreads and StoryGraph picks are shown as separate sections.
+    Each source's picks are shown as a separate section, with award winners as a
+    final section that follows its own rules (no rating filter).
+
+    `down_sources` names sources that returned nothing they plausibly could; they
+    are called out in bold red on the first line, since the alternative is a feed
+    that looks merely quiet while half of it is dead.
 
     Uses Gmail SMTP with TLS (port 587). Requires a Gmail App Password
     (not a regular password) — 2FA must be enabled on the Google account.
     """
     run_date = run_date or date.today()
     storygraph_books = storygraph_books or []
+    google_books = google_books or []
+    award_winners = award_winners or []
+    award_notes = award_notes or []
+    down_sources = down_sources or []
 
     smtp_host = os.environ.get("SMTP_HOST", "")
     smtp_user = os.environ.get("SMTP_USER", "")
@@ -331,16 +503,36 @@ def send_email(
     if not smtp_user.endswith("@gmail.com"):
         logger.info("Sending from non-Gmail address %s — ensure SPF/DKIM are configured on the domain", smtp_user)
 
-    count = len(books) + len(storygraph_books)
+    count = len(books) + len(storygraph_books) + len(google_books)
     # Don't claim a single "over X" bar: the union mixes Goodreads (>=min_rating)
     # and StoryGraph (>4.0) picks, so a counted book may sit below min_rating.
-    subject = (
-        f"[Books] {count} new candidate{'s' if count != 1 else ''} "
-        f"— {run_date.isoformat()}"
+    # Award winners are counted separately — they cleared no rating bar at all.
+    award_suffix = (
+        f" + {len(award_winners)} award winner{'s' if len(award_winners) != 1 else ''}"
+        if award_winners else ""
     )
+    if count == 0 and award_winners:
+        # "0 new candidates + 3 award winners" reads badly for an awards-only week.
+        subject = (
+            f"[Books] {len(award_winners)} award winner"
+            f"{'s' if len(award_winners) != 1 else ''} — {run_date.isoformat()}"
+        )
+    else:
+        subject = (
+            f"[Books] {count} new candidate{'s' if count != 1 else ''}"
+            f"{award_suffix} — {run_date.isoformat()}"
+        )
 
-    # Plain-text body — one section per source
-    plain_lines = [
+    # An outage email can otherwise arrive titled "0 new candidates", which reads
+    # as a quiet week and goes unopened — defeating the point of the warning.
+    if down_sources:
+        subject = f"⚠ {subject}"
+
+    # Plain-text body — one section per source, outage warning first
+    plain_lines = []
+    if down_sources:
+        plain_lines += [_outage_banner_text(down_sources), ""]
+    plain_lines += [
         f"New book shortlist — {run_date.isoformat()}",
         f"Full running list: {CATALOG_URL}",
         "",
@@ -352,10 +544,21 @@ def send_email(
             plain_lines.append(_format_book_entry(i, book, markdown=False))
     else:
         plain_lines.append("No new Goodreads books passed the filter this week.")
-    if storygraph_books:
-        plain_lines += ["", f"From StoryGraph ({len(storygraph_books)}):", ""]
-        for i, book in enumerate(storygraph_books, 1):
+    for label, section_books in (
+        ("StoryGraph", storygraph_books),
+        ("Google Books", google_books),
+    ):
+        if not section_books:
+            continue
+        plain_lines += ["", f"From {label} ({len(section_books)}):", ""]
+        for i, book in enumerate(section_books, 1):
             plain_lines.append(_format_book_entry(i, book, markdown=False))
+    if award_winners:
+        plain_lines += ["", f"Award winners announced recently ({len(award_winners)}):", ""]
+        for i, winner in enumerate(award_winners, 1):
+            plain_lines.append(_format_award_entry(i, winner, markdown=False))
+    if award_notes:
+        plain_lines += ["", f"Sources: {' · '.join(award_notes)}"]
     plain_body = "\n".join(plain_lines)
 
     # HTML body — a helper builds one table per source
@@ -392,19 +595,62 @@ def send_email(
             "<tbody>" + "".join(rows) + "</tbody></table>"
         )
 
-    storygraph_section = (
-        f"<h3>From StoryGraph ({len(storygraph_books)})</h3>{_table(storygraph_books)}"
-        if storygraph_books else ""
+    secondary_sections = "".join(
+        f"<h3>From {label} ({len(section_books)})</h3>{_table(section_books)}"
+        for label, section_books in (
+            ("StoryGraph", storygraph_books),
+            ("Google Books", google_books),
+        )
+        if section_books
+    )
+
+    def _award_table(winners: list) -> str:
+        rows = []
+        for i, w in enumerate(winners, 1):
+            def _cell(rating, count, url):
+                text = html.escape(_rating_cell(rating, count))
+                return f'<a href="{html.escape(url)}">{text}</a>' if url else text
+            rows.append(
+                f"<tr><td>{i}</td>"
+                f"<td>{html.escape(w.title)}</td>"
+                f"<td>{html.escape(w.author)}</td>"
+                f"<td>{html.escape(w.award_label)}</td>"
+                f"<td>{_cell(w.goodreads_rating, w.goodreads_rating_count, w.goodreads_url)}</td>"
+                f"<td>{_cell(w.storygraph_rating, w.storygraph_rating_count, w.storygraph_url)}</td>"
+                "</tr>"
+            )
+        return (
+            "<table border='1' cellpadding='4' cellspacing='0' "
+            "style='border-collapse:collapse;font-size:0.9em'>"
+            "<thead><tr><th>#</th><th>Title</th><th>Author</th><th>Award</th>"
+            "<th>Goodreads</th><th>StoryGraph</th></tr></thead>"
+            "<tbody>" + "".join(rows) + "</tbody></table>"
+        )
+
+    award_section = (
+        f"<h3>Award winners announced recently ({len(award_winners)})</h3>"
+        f"{_award_table(award_winners)}"
+        "<p style='font-size:0.8em;color:#666'>Award winners are listed on "
+        "announcement — no rating threshold is applied.</p>"
+        if award_winners else ""
+    )
+    notes_section = (
+        f"<p style='font-size:0.75em;color:#999'>Sources: "
+        f"{html.escape(' · '.join(award_notes))}</p>"
+        if award_notes else ""
     )
 
     html_body = f"""<!DOCTYPE html>
 <html><body style="font-family:system-ui,sans-serif;max-width:700px;margin:0 auto;padding:1rem">
+{_outage_banner_html(down_sources)}
 <h2>New book shortlist — {run_date.isoformat()}</h2>
 <p><a href="{CATALOG_URL}">View the full running list with rating history →</a></p>
 <h3>From Goodreads ({len(books)})</h3>
 {_table(books)}
-{storygraph_section}
-<p style="font-size:0.8em;color:#666">Goodreads filter: ≥{min_rating} rating, ≥500 ratings · StoryGraph filter: &gt;4.0 rating, &gt;70 ratings</p>
+{secondary_sections}
+{award_section}
+<p style="font-size:0.8em;color:#666">Goodreads filter: ≥{min_rating} rating, ≥{min_rating_count:,} ratings · StoryGraph filter: &gt;{STORYGRAPH_MIN_RATING} rating, &gt;{STORYGRAPH_MIN_COUNT} ratings</p>
+{notes_section}
 </body></html>"""
 
     msg = MIMEMultipart("alternative")
