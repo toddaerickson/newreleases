@@ -1,5 +1,20 @@
 [
   {
+    "title": "The Unknown",
+    "author": "Riley Sager",
+    "genre": "fiction, horror, thriller",
+    "first_seen": "2026-08-09",
+    "rating_first": 4.09,
+    "rating_count_first": 634,
+    "rating_last": 4.09,
+    "rating_count_last": 634,
+    "delta": 0.0,
+    "source": "StoryGraph",
+    "link": "https://app.thestorygraph.com/books/80883781-a012-4d44-982e-fe480524a566",
+    "goodreads_url": "",
+    "description": ""
+  },
+  {
     "title": "A Trade of Blood",
     "author": "Robert Jackson Bennett",
     "genre": "",
