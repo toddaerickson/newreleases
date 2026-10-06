@@ -8,8 +8,8 @@ and Cloudflare judges the runner IP as well as the TLS fingerprint, so a pass on
 laptop says little. `.github/workflows/connections.yml` runs it there on demand.
 
 Not a pytest module (pytest's testpaths is tests/): it hits live sites, and the
-answer changes week to week. Exit status is 1 if Goodreads or StoryGraph (with the
-pinned IMPERSONATE profile) is unreachable.
+answer changes week to week. Exit status is 1 if Goodreads or the StoryGraph code
+path (pinned profile + fallback chain) yields nothing.
 """
 
 import argparse
@@ -55,6 +55,20 @@ def probe_storygraph(profile: str) -> tuple[bool, str, str | None]:
         pane = BeautifulSoup(resp.text, "html.parser").select_one("div.book-pane[data-book-id]")
         book_id = pane.get("data-book-id") if pane else None
     return verdict.startswith("OK"), verdict, book_id
+
+
+def probe_storygraph_pipeline() -> tuple[bool, str]:
+    """Run fetch_storygraph_new_releases (1 page) + enrich one book via storygraph._get."""
+    import logging
+    logging.basicConfig(level=logging.WARNING, format="    [%(levelname)s] %(message)s")
+    books = storygraph.fetch_storygraph_new_releases(window_days=365, max_pages=1)
+    profile = storygraph._active_profile
+    if not books:
+        why = "every profile rejected" if storygraph._all_profiles_blocked else "0 recent books parsed"
+        return False, f"FAIL ({why})"
+    book = storygraph.enrich_storygraph_book(books[0])
+    rated = f"rating {book.rating} / {book.rating_count} reviews" if book.rating is not None else "no rating"
+    return True, f"OK ({len(books)} books via {profile}; {book.title!r}: {rated})"
 
 
 def probe_storygraph_fragment(profile: str, book_id: str) -> str:
@@ -103,10 +117,15 @@ def main() -> int:
     print(f"{'Goodreads new-release page':38} {verdict}")
 
     ok, verdict, book_id = probe_storygraph(storygraph.IMPERSONATE)
-    critical_ok &= ok
-    print(f"{'StoryGraph browse (' + storygraph.IMPERSONATE + ')':38} {verdict}")
+    print(f"{'StoryGraph browse (pinned ' + storygraph.IMPERSONATE + ')':38} {verdict}")
     if book_id:
         print(f"{'StoryGraph rating fragment':38} {probe_storygraph_fragment(storygraph.IMPERSONATE, book_id)}")
+
+    # The real code path, including the fallback chain — this is what the weekly
+    # run depends on, so it (not the pinned probe) decides the exit status.
+    sg_ok, sg_verdict = probe_storygraph_pipeline()
+    critical_ok &= sg_ok
+    print(f"{'StoryGraph pipeline (with fallback)':38} {sg_verdict}")
 
     for name, url, marker, kw in [
         ("Google Books API (opt-in)", googlebooks.API_URL, '"items"',
