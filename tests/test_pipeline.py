@@ -42,9 +42,11 @@ def pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "enrich_storygraph_book", lambda book: book)
     # Award sources are live HTTP; stub the scan so the pipeline tests stay offline.
     state["awards"] = []
-    state["award_notes"] = ["sfadb 0 blocks -> 0 winners"]
+    state["award_notes"] = ["sfadb 40 blocks -> 0 winners"]
+    state["award_down"] = []
     monkeypatch.setattr(main.awards_mod, "fetch_award_winners",
-                        lambda years=None: (list(state["awards"]), state["award_notes"]))
+                        lambda years=None: (list(state["awards"]), state["award_notes"],
+                                            list(state["award_down"])))
     monkeypatch.setattr(main.awards_mod, "append_ratings",
                         lambda winner, memo=None: winner)
     return state
@@ -187,7 +189,9 @@ def test_a_broken_award_scan_never_breaks_the_feed(pipeline, tmp_path, monkeypat
              isbn13="978", goodreads_url="https://goodreads.example/1"),
     ]
     assert run_pipeline(skip_storygraph=True) == 0
-    assert "Good Book" in _today_shortlist(tmp_path)
+    text = _today_shortlist(tmp_path)
+    assert "Good Book" in text
+    assert "Award-winner scan returned no results" in text
 
 
 def test_first_award_run_seeds_without_reporting(pipeline, tmp_path):
@@ -229,6 +233,31 @@ def test_new_winner_is_reported_once_then_never_again(pipeline, tmp_path):
     assert "The Buffalo Hunter Hunter" not in _today_shortlist(tmp_path)
 
 
+def test_first_award_run_defers_seeding_while_a_source_is_down(pipeline, tmp_path):
+    """Seeding without sfadb would make its whole back catalogue "new" on its return."""
+    from awards import AwardWinner
+    wiki = AwardWinner(award_name="Booker Prize", award_year=2026, category="",
+                       title="Wiki Book", author="W")
+    sfadb = AwardWinner(award_name="Nebula Awards", award_year=2026, category="novel",
+                        title="Sfadb Book", author="S")
+    pipeline["goodreads"] = [
+        Book(title="Good Book", author="A", rating=4.5, rating_count=900,
+             isbn13="978", goodreads_url="https://goodreads.example/1"),
+    ]
+    pipeline["awards"], pipeline["award_down"] = [wiki], ["sfadb"]
+    run_pipeline(skip_storygraph=True)  # sfadb down: nothing seeded, nothing shown
+    assert "Wiki Book" not in _today_shortlist(tmp_path)
+
+    pipeline["awards"], pipeline["award_down"] = [wiki, sfadb], []
+    run_pipeline(skip_storygraph=True)  # both up: seeds both
+    text = _today_shortlist(tmp_path)
+    assert "Wiki Book" not in text and "Sfadb Book" not in text
+
+    run_pipeline(skip_storygraph=True)  # neither is "new" afterwards
+    text = _today_shortlist(tmp_path)
+    assert "Wiki Book" not in text and "Sfadb Book" not in text
+
+
 def test_genre_excluded_winner_is_recorded_but_not_shown(pipeline, tmp_path):
     from awards import AwardWinner
     pipeline["awards"] = [
@@ -252,7 +281,7 @@ def test_genre_excluded_winner_is_recorded_but_not_shown(pipeline, tmp_path):
 def test_skip_awards_bypasses_the_scan(pipeline, monkeypatch):
     called: list = []
     monkeypatch.setattr(main.awards_mod, "fetch_award_winners",
-                        lambda years=None: called.append(1) or ([], []))
+                        lambda years=None: called.append(1) or ([], [], []))
     pipeline["goodreads"] = [
         Book(title="Good Book", author="A", rating=4.5, rating_count=900, isbn13="978"),
     ]
@@ -327,6 +356,23 @@ def test_outage_emails_even_when_nothing_passed(pipeline, monkeypatch):
         main.run(recipient="nobody@example.com", skip_storygraph=True)
     assert len(sent) == 1
     assert sent[0]["down_sources"] == ["Goodreads"]
+
+
+def test_dead_award_source_is_named_but_does_not_fail_the_run(pipeline, tmp_path, monkeypatch):
+    # 2026-10-04: sfadb served 0 blocks and the only trace was "sfadb 0 blocks" in
+    # the small-print Sources line. It must reach the banner, and the email must
+    # go out even on a week with nothing else to show.
+    sent: list = []
+    monkeypatch.setattr(main, "send_email",
+                        lambda *a, **kw: sent.append(kw) or True)
+    pipeline["goodreads"] = [
+        Book(title="Low Rated", author="A", rating=3.0, rating_count=900, isbn13="978"),
+    ]
+    pipeline["award_down"] = ["sfadb"]
+    main.run(recipient="nobody@example.com", skip_storygraph=True)  # no SystemExit
+    assert "sfadb (award winners) returned no results" in _today_shortlist(tmp_path)
+    assert len(sent) == 1
+    assert sent[0]["down_sources"] == ["sfadb (award winners)"]
 
 
 def test_no_email_when_quiet_and_all_sources_healthy(pipeline, monkeypatch):
