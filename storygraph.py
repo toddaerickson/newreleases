@@ -38,11 +38,18 @@ ALLOWED_HOSTS = {"app.thestorygraph.com", "thestorygraph.com"}
 # curl_cffi browser profile used to clear the Cloudflare challenge.
 #
 # This rots: Cloudflare eventually starts rejecting a given fingerprint and every
-# fetch 403s, which looks exactly like "no new books this week". Verified
-# 2026-07-29: every chrome/safari/android profile returned 403 "Just a moment...",
-# firefox135 returned 200. When StoryGraph starts 403-ing again, try the newer
-# profiles in `curl_cffi.requests.impersonate` before assuming the site changed.
-IMPERSONATE = "firefox135"
+# fetch 403s, which looks exactly like "no new books this week". History:
+#   2026-07-29  chrome/safari/android 403; firefox135 200.
+#   2026-10-06  three sweeps on GitHub ubuntu-latest runners (curl_cffi 0.16.3):
+#               every firefox*/edge*/tor145/safari26* and desktop chrome* profile
+#               403 in all three. Passes: safari155 3/3, safari184 2/3,
+#               safari172_ios 2/3, safari170/180 1/3, chrome131_android 1/3.
+#               The verdict is partly per REQUEST: safari155 got a 403 and then a
+#               200 on the same runner a minute apart. So a single 403 is not proof
+#               a profile is dead — see the fallback/give-up logic below.
+# `python test_connections.py --sweep` (or the "Test Connections" workflow) re-runs
+# that sweep.
+IMPERSONATE = "safari155"
 
 REQUEST_DELAY = 2.0  # base seconds between requests, matching the Goodreads scraper
 DEFAULT_MAX_PAGES = 10  # browse pages to scan per run (~10 books/page)
@@ -67,39 +74,102 @@ def _is_allowed_url(url: str) -> bool:
     return parsed.scheme == "https" and parsed.netloc in ALLOWED_HOSTS
 
 
+class _Blocked(Exception):
+    """A response that means "this fingerprint is rejected", not "transient"."""
+
+
+# Tried, in order, when the active profile is rejected. Only profiles that have
+# passed at least once (see IMPERSONATE) — trying the 0/3 ones adds requests, and
+# Cloudflare heat, for nothing. Unknown names raise and are skipped.
+IMPERSONATE_FALLBACKS = (
+    "safari155", "safari184", "safari172_ios", "chrome131_android",
+    "safari180", "safari170",
+)
+
+# Because rejection is partly per-request, one URL exhausting the chain does not
+# mean the source is blocked. Give up for the run only after this many URLs in a
+# row fail every profile; then return None without touching the network, since
+# more requests would only deepen an IP-level block.
+BLOCKED_AFTER_URLS = 3
+
+_active_profile = IMPERSONATE
+_consecutive_blocked_urls = 0
+_all_profiles_blocked = False
+
+
+def _fetch_once(url: str, params: dict | None, profile: str) -> str:
+    """One request. Raises _Blocked on 403/challenge, other exceptions on error."""
+    resp = cffi_requests.get(url, params=params, impersonate=profile, timeout=25)
+    if resp.status_code == 403:
+        raise _Blocked(f"HTTP 403 with impersonate={profile}")
+    resp.raise_for_status()
+    text = resp.text
+    if any(sig in text[:2000].lower() for sig in _CHALLENGE_SIGNATURES):
+        raise _Blocked(f"challenge page with impersonate={profile}")
+    return text
+
+
+def _rotate_profile(url: str, params: dict | None) -> str | None:
+    """After the active profile is rejected, try each fallback once for this URL.
+
+    Adopts the first that gets through for the rest of the run and logs it, so a
+    rotted IMPERSONATE degrades to a log warning instead of an empty feed.
+    """
+    global _active_profile, _consecutive_blocked_urls, _all_profiles_blocked
+    rejected = _active_profile
+    for profile in IMPERSONATE_FALLBACKS:
+        if profile == rejected:
+            continue
+        time.sleep(1.0 + random.uniform(0, 1.0))
+        try:
+            text = _fetch_once(url, params, profile)
+        except _Blocked:
+            continue
+        except Exception as e:  # unknown profile name, network error
+            logger.debug("StoryGraph fallback %s failed: %s", profile, e)
+            continue
+        if profile != IMPERSONATE:
+            logger.warning("StoryGraph rejected impersonate=%s; switched to %s "
+                           "(pinned IMPERSONATE is %s)", rejected, profile, IMPERSONATE)
+        _active_profile = profile
+        _consecutive_blocked_urls = 0
+        return text
+    _consecutive_blocked_urls += 1
+    if _consecutive_blocked_urls >= BLOCKED_AFTER_URLS:
+        _all_profiles_blocked = True
+        logger.error("StoryGraph rejected every curl_cffi profile on %d URLs in a row — "
+                     "Cloudflare block; no further StoryGraph requests this run",
+                     _consecutive_blocked_urls)
+    else:
+        logger.error("StoryGraph rejected every profile for %s (%d/%d before giving up)",
+                     url, _consecutive_blocked_urls, BLOCKED_AFTER_URLS)
+    return None
+
+
 def _get(url: str, params: dict | None = None) -> str | None:
     """Fetch a StoryGraph URL and return HTML text, or None on failure.
 
-    Uses curl_cffi Chrome impersonation with a small manual retry/backoff for
-    transient errors (curl_cffi has no urllib3-style Retry adapter).
+    Uses curl_cffi browser impersonation with a small manual retry/backoff for
+    transient errors (curl_cffi has no urllib3-style Retry adapter). A 403 or
+    challenge page is not transient: it triggers one pass through
+    IMPERSONATE_FALLBACKS instead of a retry.
     """
     if not _is_allowed_url(url):
         logger.warning("Refusing to fetch non-StoryGraph URL: %s", url)
         return None
+    if _all_profiles_blocked:
+        return None
 
     backoff = 3
+    global _consecutive_blocked_urls
     for attempt in range(3):
         try:
-            resp = cffi_requests.get(
-                url, params=params, impersonate=IMPERSONATE, timeout=25
-            )
-            if resp.status_code in (429, 500, 502, 503, 504):
-                logger.warning("StoryGraph %s returned %d (attempt %d)",
-                               url, resp.status_code, attempt + 1)
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            if resp.status_code == 403:
-                logger.error("StoryGraph %s returned 403 — Cloudflare block "
-                             "(curl_cffi may need a newer browser profile)", url)
-                return None
-            resp.raise_for_status()
-            text = resp.text
-            low = text[:2000].lower()
-            if any(sig in low for sig in _CHALLENGE_SIGNATURES):
-                logger.error("Cloudflare/bot challenge detected at %s", url)
-                return None
+            text = _fetch_once(url, params, _active_profile)
+            _consecutive_blocked_urls = 0
             return text
+        except _Blocked as e:
+            logger.error("StoryGraph %s blocked (%s) — trying fallback profiles", url, e)
+            return _rotate_profile(url, params)
         except Exception as e:  # curl_cffi raises its own exception types
             logger.warning("Failed to fetch %s (attempt %d): %s", url, attempt + 1, e)
             time.sleep(backoff)
