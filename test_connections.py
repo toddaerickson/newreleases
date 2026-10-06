@@ -13,6 +13,7 @@ pinned IMPERSONATE profile) is unreachable.
 """
 
 import argparse
+import re
 import sys
 import time
 import typing
@@ -46,7 +47,7 @@ def probe_storygraph(profile: str) -> tuple[bool, str, str | None]:
     try:
         resp = cffi_requests.get(storygraph.BROWSE_URL, impersonate=profile, timeout=25)
     except Exception as e:
-        return False, f"ERROR ({str(e)[:90]})", None
+        return False, f"ERROR ({str(e)[:200]})", None
     verdict = _verdict(resp.status_code, resp.text, "book-pane")
     book_id = None
     if verdict.startswith("OK"):
@@ -61,7 +62,7 @@ def probe_storygraph_fragment(profile: str, book_id: str) -> str:
     try:
         resp = cffi_requests.get(url, impersonate=profile, timeout=25)
     except Exception as e:
-        return f"ERROR ({str(e)[:90]})"
+        return f"ERROR ({str(e)[:200]})"
     return _verdict(resp.status_code, resp.text, "average-star-rating")
 
 
@@ -70,7 +71,7 @@ def probe_plain(url: str, marker: str, session=requests, **kwargs) -> tuple[bool
     try:
         resp = session.get(url, timeout=(5, 20), **kwargs)
     except requests.RequestException as e:
-        return False, f"ERROR ({str(e)[:90]})"
+        return False, f"ERROR ({str(e)[:200]})"
     verdict = _verdict(resp.status_code, resp.text, marker)
     return verdict.startswith("OK"), verdict
 
@@ -78,8 +79,10 @@ def probe_plain(url: str, marker: str, session=requests, **kwargs) -> tuple[bool
 def all_profiles() -> list[str]:
     from curl_cffi.requests import impersonate
     names = typing.get_args(getattr(impersonate, "BrowserTypeLiteral", typing.Literal[()]))
-    # Versioned names only; the bare aliases ("chrome", "firefox") duplicate one of them.
-    return [n for n in names if any(c.isdigit() for c in n)] or list(storygraph.IMPERSONATE_FALLBACKS)
+    # Versioned names only. The bare aliases ("chrome") and the legacy dotted
+    # spellings ("safari18_0" == "safari180") duplicate a canonical name.
+    return ([n for n in names if any(c.isdigit() for c in n) and not re.match(r"safari\d+_\d", n)]
+            or list(storygraph.IMPERSONATE_FALLBACKS))
 
 
 def main() -> int:

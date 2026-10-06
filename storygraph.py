@@ -38,11 +38,14 @@ ALLOWED_HOSTS = {"app.thestorygraph.com", "thestorygraph.com"}
 # curl_cffi browser profile used to clear the Cloudflare challenge.
 #
 # This rots: Cloudflare eventually starts rejecting a given fingerprint and every
-# fetch 403s, which looks exactly like "no new books this week". Verified
-# 2026-07-29: every chrome/safari/android profile returned 403 "Just a moment...",
-# firefox135 returned 200. When StoryGraph starts 403-ing again, try the newer
-# profiles in `curl_cffi.requests.impersonate` before assuming the site changed.
-IMPERSONATE = "firefox135"
+# fetch 403s, which looks exactly like "no new books this week". History:
+#   2026-07-29  chrome/safari/android 403; firefox135 200.
+#   2026-10-06  firefox* (133-147), chrome*, edge*, tor145, safari26* 403;
+#               desktop safari155-safari184 and safari172_ios 200
+#               (curl_cffi 0.16.3, GitHub ubuntu-latest runner).
+# `python test_connections.py --sweep` (or the "Test Connections" workflow) re-runs
+# that sweep; _get also falls back through IMPERSONATE_FALLBACKS on its own.
+IMPERSONATE = "safari184"
 
 REQUEST_DELAY = 2.0  # base seconds between requests, matching the Goodreads scraper
 DEFAULT_MAX_PAGES = 10  # browse pages to scan per run (~10 books/page)
@@ -73,10 +76,11 @@ class _Blocked(Exception):
 
 # Tried, in order, when IMPERSONATE is rejected. Profiles unknown to the installed
 # curl_cffi raise and are skipped, so listing newer ones here is harmless.
+# Ordered: profiles last verified working first, then newer/other families.
 IMPERSONATE_FALLBACKS = (
-    "firefox147", "firefox144", "firefox135", "firefox133",
-    "chrome146", "chrome145", "chrome142", "chrome136",
-    "safari2601", "safari260", "safari184", "edge101", "tor145",
+    "safari180", "safari172_ios", "safari170", "safari155",
+    "safari2601", "safari260", "firefox147", "firefox135",
+    "chrome146", "chrome142", "edge101", "tor145",
 )
 
 # Process-wide state: the profile that last worked, and whether every profile has
