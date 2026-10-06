@@ -34,6 +34,8 @@ def fake_get(monkeypatch):
     monkeypatch.setattr(storygraph, "IMPERSONATE_FALLBACKS", ("p1", "p2", "p3"))
     monkeypatch.setattr(storygraph, "_active_profile", "pinned")
     monkeypatch.setattr(storygraph, "_all_profiles_blocked", False)
+    monkeypatch.setattr(storygraph, "_consecutive_blocked_urls", 0)
+    monkeypatch.setattr(storygraph, "BLOCKED_AFTER_URLS", 2)
     return calls, table
 
 
@@ -64,12 +66,25 @@ def test_challenge_page_counts_as_blocked(fake_get):
     assert storygraph._active_profile == "p1"
 
 
-def test_all_rejected_stops_further_requests(fake_get):
-    calls, _ = fake_get
+def test_one_fully_rejected_url_does_not_block_the_run(fake_get):
+    """Rejection is partly per-request, so a single unlucky URL must not end the feed."""
+    calls, table = fake_get
     assert storygraph._get(storygraph.BROWSE_URL) is None
     assert calls == ["pinned", "p1", "p2", "p3"]
+    assert not storygraph._all_profiles_blocked
+
+    table["pinned"] = _Resp(200)
+    calls.clear()
+    assert storygraph._get(storygraph.BROWSE_URL) == "<html>ok</html>"
+    assert storygraph._consecutive_blocked_urls == 0  # a success resets the count
+
+
+def test_consecutive_rejected_urls_stop_further_requests(fake_get):
+    calls, _ = fake_get
+    storygraph._get(storygraph.BROWSE_URL)
+    storygraph._get(storygraph.BROWSE_URL)  # BLOCKED_AFTER_URLS = 2 in the fixture
     assert storygraph._all_profiles_blocked
 
     calls.clear()
     assert storygraph._get(storygraph.BROWSE_URL) is None
-    assert calls == []  # no more requests once every profile has been rejected
+    assert calls == []  # no more requests once the source is judged blocked

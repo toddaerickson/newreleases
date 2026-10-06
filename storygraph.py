@@ -40,12 +40,13 @@ ALLOWED_HOSTS = {"app.thestorygraph.com", "thestorygraph.com"}
 # This rots: Cloudflare eventually starts rejecting a given fingerprint and every
 # fetch 403s, which looks exactly like "no new books this week". History:
 #   2026-07-29  chrome/safari/android 403; firefox135 200.
-#   2026-10-06  two sweeps on GitHub ubuntu-latest runners (curl_cffi 0.16.3):
-#               every firefox*/chrome*/edge*/tor145/safari26* profile 403 in both;
-#               safari155 and safari172_ios 200 in both; safari170/180/184 200 in
-#               one run and 403 in the other. The verdict varies by runner (i.e. by
-#               IP), so no single pin is reliable — the fallback chain below is the
-#               actual defence, the pin is just the best-observed first try.
+#   2026-10-06  three sweeps on GitHub ubuntu-latest runners (curl_cffi 0.16.3):
+#               every firefox*/edge*/tor145/safari26* and desktop chrome* profile
+#               403 in all three. Passes: safari155 3/3, safari184 2/3,
+#               safari172_ios 2/3, safari170/180 1/3, chrome131_android 1/3.
+#               The verdict is partly per REQUEST: safari155 got a 403 and then a
+#               200 on the same runner a minute apart. So a single 403 is not proof
+#               a profile is dead — see the fallback/give-up logic below.
 # `python test_connections.py --sweep` (or the "Test Connections" workflow) re-runs
 # that sweep.
 IMPERSONATE = "safari155"
@@ -77,19 +78,22 @@ class _Blocked(Exception):
     """A response that means "this fingerprint is rejected", not "transient"."""
 
 
-# Tried, in order, when IMPERSONATE is rejected. Profiles unknown to the installed
-# curl_cffi raise and are skipped, so listing newer ones here is harmless.
-# Ordered by observed pass rate (see IMPERSONATE), then newer/other families.
+# Tried, in order, when the active profile is rejected. Only profiles that have
+# passed at least once (see IMPERSONATE) — trying the 0/3 ones adds requests, and
+# Cloudflare heat, for nothing. Unknown names raise and are skipped.
 IMPERSONATE_FALLBACKS = (
-    "safari172_ios", "safari184", "safari180", "safari170",
-    "safari2601", "safari260", "firefox147", "firefox135",
-    "chrome146", "chrome142", "edge101", "tor145",
+    "safari155", "safari184", "safari172_ios", "chrome131_android",
+    "safari180", "safari170",
 )
 
-# Process-wide state: the profile that last worked, and whether every profile has
-# been rejected this run. Once blocked, later calls return None without touching
-# the network — another ~15 requests per URL would only deepen an IP-level block.
+# Because rejection is partly per-request, one URL exhausting the chain does not
+# mean the source is blocked. Give up for the run only after this many URLs in a
+# row fail every profile; then return None without touching the network, since
+# more requests would only deepen an IP-level block.
+BLOCKED_AFTER_URLS = 3
+
 _active_profile = IMPERSONATE
+_consecutive_blocked_urls = 0
 _all_profiles_blocked = False
 
 
@@ -106,12 +110,12 @@ def _fetch_once(url: str, params: dict | None, profile: str) -> str:
 
 
 def _rotate_profile(url: str, params: dict | None) -> str | None:
-    """After the active profile is rejected, try each fallback once.
+    """After the active profile is rejected, try each fallback once for this URL.
 
     Adopts the first that gets through for the rest of the run and logs it, so a
     rotted IMPERSONATE degrades to a log warning instead of an empty feed.
     """
-    global _active_profile, _all_profiles_blocked
+    global _active_profile, _consecutive_blocked_urls, _all_profiles_blocked
     rejected = _active_profile
     for profile in IMPERSONATE_FALLBACKS:
         if profile == rejected:
@@ -124,14 +128,21 @@ def _rotate_profile(url: str, params: dict | None) -> str | None:
         except Exception as e:  # unknown profile name, network error
             logger.debug("StoryGraph fallback %s failed: %s", profile, e)
             continue
-        logger.warning("StoryGraph rejected impersonate=%s; %s works — update "
-                       "IMPERSONATE in storygraph.py", rejected, profile)
+        if profile != IMPERSONATE:
+            logger.warning("StoryGraph rejected impersonate=%s; switched to %s "
+                           "(pinned IMPERSONATE is %s)", rejected, profile, IMPERSONATE)
         _active_profile = profile
+        _consecutive_blocked_urls = 0
         return text
-    _all_profiles_blocked = True
-    logger.error("StoryGraph rejected every curl_cffi profile (%s + %d fallbacks) — "
-                 "Cloudflare block; upgrade curl_cffi or wait out an IP block",
-                 rejected, len(IMPERSONATE_FALLBACKS))
+    _consecutive_blocked_urls += 1
+    if _consecutive_blocked_urls >= BLOCKED_AFTER_URLS:
+        _all_profiles_blocked = True
+        logger.error("StoryGraph rejected every curl_cffi profile on %d URLs in a row — "
+                     "Cloudflare block; no further StoryGraph requests this run",
+                     _consecutive_blocked_urls)
+    else:
+        logger.error("StoryGraph rejected every profile for %s (%d/%d before giving up)",
+                     url, _consecutive_blocked_urls, BLOCKED_AFTER_URLS)
     return None
 
 
@@ -150,9 +161,12 @@ def _get(url: str, params: dict | None = None) -> str | None:
         return None
 
     backoff = 3
+    global _consecutive_blocked_urls
     for attempt in range(3):
         try:
-            return _fetch_once(url, params, _active_profile)
+            text = _fetch_once(url, params, _active_profile)
+            _consecutive_blocked_urls = 0
+            return text
         except _Blocked as e:
             logger.error("StoryGraph %s blocked (%s) — trying fallback profiles", url, e)
             return _rotate_profile(url, params)
