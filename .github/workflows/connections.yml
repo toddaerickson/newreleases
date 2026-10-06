@@ -1,0 +1,33 @@
+name: Test Connections
+
+# Live reachability probe for every source, from a GitHub runner — the network the
+# weekly cron actually uses (Cloudflare judges the runner IP, not just the TLS
+# fingerprint). Read-only: no DB writes, no email, no commit.
+#
+# Runs on demand, and on any push that touches the StoryGraph client or the probe,
+# so a profile change is checked against the live site before it reaches the cron.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - "storygraph.py"
+      - "test_connections.py"
+      - ".github/workflows/connections.yml"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Probe sources (with StoryGraph profile sweep)
+        run: python test_connections.py --sweep
