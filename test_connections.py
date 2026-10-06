@@ -64,7 +64,8 @@ def probe_storygraph_pipeline() -> tuple[bool, str]:
     books = storygraph.fetch_storygraph_new_releases(window_days=365, max_pages=1)
     profile = storygraph._active_profile
     if not books:
-        why = "every profile rejected" if storygraph._all_profiles_blocked else "0 recent books parsed"
+        why = ("every profile rejected" if storygraph._all_profiles_blocked
+               else "0 books: fetch error or markup change — see warnings above")
         return False, f"FAIL ({why})"
     book = storygraph.enrich_storygraph_book(books[0])
     rated = f"rating {book.rating} / {book.rating_count} reviews" if book.rating is not None else "no rating"
