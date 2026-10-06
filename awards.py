@@ -379,7 +379,13 @@ def _get(url: str, params: dict | None = None) -> requests.Response | None:
 
 
 def parse_sfadb(html: str, year: int) -> tuple[list[AwardWinner], str]:
-    """Parse an sfadb <year>_Results page. Pure: no network.
+    """Parse an sfadb <year>_Results page. Pure: no network."""
+    winners, note, _ = _parse_sfadb(html, year)
+    return winners, note
+
+
+def _parse_sfadb(html: str, year: int) -> tuple[list[AwardWinner], str, int]:
+    """parse_sfadb plus the block count, which scan_sfadb uses as its health signal.
 
     Shape (verified): one div.chronowinsblock per award, award name in the
     block's first <a>, one <li> per category holding
@@ -440,16 +446,27 @@ def parse_sfadb(html: str, year: int) -> tuple[list[AwardWinner], str]:
     if blocks and not bold_titles:
         note += " (no bolded titles — markup may have changed)"
         logger.warning("sfadb %d: %d blocks but zero bolded titles — check markup", year, len(blocks))
-    return winners, note
+    return winners, note, len(blocks)
 
 
-def scan_sfadb(year: int) -> tuple[list[AwardWinner], str]:
+def scan_sfadb(year: int) -> tuple[list[AwardWinner], str, bool]:
+    """Return (winners, note, healthy). Healthy means the page had award blocks.
+
+    A 2xx page with zero blocks is treated as a failure, like a timeout: the
+    2026 page went from 41 blocks (09-27) to 0 (10-04), which no quiet week
+    explains. A new year's page that is genuinely empty in January is covered by
+    fetch_award_winners judging health across years.
+    """
     url = SFADB_URL.format(year=year)
     resp = _get(url)
     _polite_sleep()
     if not resp:
-        return [], f"sfadb {year} fetch FAILED"
-    return parse_sfadb(resp.text, year)
+        return [], f"sfadb {year} fetch FAILED", False
+    winners, note, blocks = _parse_sfadb(resp.text, year)
+    if not blocks:
+        logger.warning("sfadb %d: HTTP %d but no award blocks (%d bytes, starts %r)",
+                       year, resp.status_code, len(resp.text), resp.text[:200])
+    return winners, note, blocks > 0
 
 
 # --- Wikipedia ---------------------------------------------------------------
@@ -528,9 +545,15 @@ def _expand_table(table, ncols: int) -> list[list[Cell]]:
 
 def parse_wikipedia(payload: dict, year: int) -> tuple[list[AwardWinner], str]:
     """Parse the '<year> in literature' awards table from rendered HTML. Pure."""
+    winners, note, _ = _parse_wikipedia(payload, year)
+    return winners, note
+
+
+def _parse_wikipedia(payload: dict, year: int) -> tuple[list[AwardWinner], str, int]:
+    """parse_wikipedia plus the data-row count, scan_wikipedia's health signal."""
     html = (payload or {}).get("parse", {}).get("text", "")
     if not html:
-        return [], f"Wikipedia {year} EMPTY response"
+        return [], f"Wikipedia {year} EMPTY response", 0
 
     soup = BeautifulSoup(html, "lxml")
     for sup in soup.select("sup"):
@@ -549,7 +572,7 @@ def parse_wikipedia(payload: dict, year: int) -> tuple[list[AwardWinner], str]:
 
     if table is None:
         logger.warning("Wikipedia %d: no awards table with an Award/Title header", year)
-        return [], f"Wikipedia {year} table NOT FOUND"
+        return [], f"Wikipedia {year} table NOT FOUND", 0
 
     # Column positions by name, so an inserted or reordered column is absorbed.
     idx_award = header.index("award")
@@ -602,10 +625,11 @@ def parse_wikipedia(payload: dict, year: int) -> tuple[list[AwardWinner], str]:
             author=author.strip(),
         ))
 
-    return winners, f"Wikipedia {data_rows} rows -> {len(winners)} winners"
+    return winners, f"Wikipedia {data_rows} rows -> {len(winners)} winners", data_rows
 
 
-def scan_wikipedia(year: int) -> tuple[list[AwardWinner], str]:
+def scan_wikipedia(year: int) -> tuple[list[AwardWinner], str, bool]:
+    """Return (winners, note, healthy). Healthy means the awards table had rows."""
     resp = _get(WIKIPEDIA_API, params={
         "action": "parse",
         "page": f"{year} in literature",
@@ -615,13 +639,14 @@ def scan_wikipedia(year: int) -> tuple[list[AwardWinner], str]:
     })
     _polite_sleep()
     if not resp:
-        return [], f"Wikipedia {year} fetch FAILED"
+        return [], f"Wikipedia {year} fetch FAILED", False
     try:
         payload = resp.json()
     except ValueError:
         logger.warning("Wikipedia %d: response was not JSON", year)
-        return [], f"Wikipedia {year} bad JSON"
-    return parse_wikipedia(payload, year)
+        return [], f"Wikipedia {year} bad JSON", False
+    winners, note, rows = _parse_wikipedia(payload, year)
+    return winners, note, rows > 0
 
 
 def years_to_scan(today: date | None = None) -> list[int]:
@@ -634,8 +659,17 @@ def years_to_scan(today: date | None = None) -> list[int]:
     return [today.year] if today.month > 3 else [today.year, today.year - 1]
 
 
-def fetch_award_winners(years: list[int] | None = None) -> tuple[list[AwardWinner], list[str]]:
+def fetch_award_winners(
+    years: list[int] | None = None,
+) -> tuple[list[AwardWinner], list[str], list[str]]:
     """Scan every source for every year. Never raises: a dead source yields a note.
+
+    Returns (winners, notes, down). ``down`` names each source that was not
+    healthy for *any* scanned year — failed fetch, crash, or a 2xx page with no
+    blocks/rows. A source is judged across years, not per year, because early in
+    the year the new year's page can legitimately be empty while the previous
+    year's (also scanned until April, see years_to_scan) still proves the source
+    is up.
 
     Winners are de-duplicated on award_key, so a book honoured by both sources
     (or listed twice on one page) is returned once.
@@ -644,15 +678,18 @@ def fetch_award_winners(years: list[int] | None = None) -> tuple[list[AwardWinne
     winners: list[AwardWinner] = []
     notes: list[str] = []
     seen: set[str] = set()
+    healthy: dict[str, bool] = {}
 
     for year in years:
         for label, scan in (("sfadb", scan_sfadb), ("Wikipedia", scan_wikipedia)):
+            healthy.setdefault(label, False)
             try:
-                found, note = scan(year)
+                found, note, ok = scan(year)
             except Exception as e:  # a broken source must not stop the other
                 logger.error("%s %d scan crashed: %s", label, year, e)
                 notes.append(f"{label} {year} scan crashed: {e}")
                 continue
+            healthy[label] |= ok
             notes.append(note)
             for winner in found:
                 if winner.award_key in seen:
@@ -660,7 +697,8 @@ def fetch_award_winners(years: list[int] | None = None) -> tuple[list[AwardWinne
                 seen.add(winner.award_key)
                 winners.append(winner)
 
-    return winners, notes
+    down = [label for label, ok in healthy.items() if not ok]
+    return winners, notes, down
 
 
 # --- rating lookup -----------------------------------------------------------

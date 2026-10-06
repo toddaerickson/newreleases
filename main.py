@@ -139,8 +139,8 @@ def _apply_genre_exclusion(conn, books: list[Book]) -> tuple[list[Book], int]:
     return kept, excluded
 
 
-def collect_award_winners(conn) -> tuple[list, list[str]]:
-    """Scan the award sources and return (winners to report, source notes).
+def collect_award_winners(conn) -> tuple[list, list[str], list[str]]:
+    """Scan the award sources and return (winners to report, source notes, down sources).
 
     Award winners bypass the book pipeline entirely — no rating filter, no
     release window, no seen_books dedup. "Already reported" is tracked in
@@ -149,17 +149,29 @@ def collect_award_winners(conn) -> tuple[list, list[str]]:
 
     On a first run (empty table) every winner of the scanned years is new, which
     would be months of stale announcements. Seed instead: record them all as
-    already reported, make no rating requests, and report nothing.
+    already reported, make no rating requests, and report nothing. Seeding waits
+    until every source is up: seeding without one would make that source's whole
+    back catalogue "new" the first week it returns.
+
+    ``down`` names each award source that produced nothing (see
+    awards.fetch_award_winners); the caller puts it in the outage banner.
     """
-    winners, notes = awards_mod.fetch_award_winners()
+    winners, notes, down = awards_mod.fetch_award_winners()
     logger.info("Award scan: %s", " · ".join(notes) if notes else "no sources responded")
+    if down:
+        logger.error("Award source(s) returned nothing: %s — likely down or blocked, "
+                     "not a quiet year.", ", ".join(down))
 
     fresh = [w for w in winners if not award_seen(conn, w.award_key)]
     if not fresh:
         logger.info("No new award winners (%d already on record)", len(winners))
-        return [], notes
+        return [], notes, down
 
     if count_award_rows(conn) == 0:
+        if down:
+            logger.warning("First award run but %s down — deferring the seed so its "
+                           "winners are not reported as new later.", ", ".join(down))
+            return [], notes, down
         logger.info("First award run — seeding %d winner(s) as already reported, "
                     "no ratings fetched. Delete a row to have it listed.", len(fresh))
         for w in fresh:
@@ -169,7 +181,7 @@ def collect_award_winners(conn) -> tuple[list, list[str]]:
                 title=w.title, author=w.author,
             )
             logger.info("  seeded: %s — %s (%s)", w.title, w.author, w.award_label)
-        return [], notes
+        return [], notes, down
 
     logger.info("%d new award winner(s) — resolving ratings", len(fresh))
     reported: list = []
@@ -221,7 +233,7 @@ def collect_award_winners(conn) -> tuple[list, list[str]]:
         handled += 1
 
     logger.info("%d award winner(s) to report", len(reported))
-    return reported, notes
+    return reported, notes, down
 
 
 def run(
@@ -538,10 +550,14 @@ def run(
         # release feed, so this can log and move on but never propagate.
         if not skip_awards:
             try:
-                award_winners, award_notes = collect_award_winners(conn)
+                award_winners, award_notes, award_down = collect_award_winners(conn)
+                # Banner-only, like StoryGraph: no scraper_alarm, so the weekly
+                # commit (and with it the award ledger) still lands.
+                down_sources.extend(f"{name} (award winners)" for name in award_down)
             except Exception as e:
                 logger.exception("Award scan failed — continuing without it: %s", e)
                 award_notes = [f"award scan crashed: {e}"]
+                down_sources.append("Award-winner scan")
 
         # --- Phase 5: Output ---
         shortlist_path = write_shortlist(

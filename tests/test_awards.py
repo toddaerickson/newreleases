@@ -409,3 +409,70 @@ class TestYearsToScan:
     def test_previous_year_included_early(self):
         from datetime import date
         assert years_to_scan(date(2026, 2, 1)) == [2026, 2025]
+
+
+class TestSourceHealth:
+    """A dead award source must be reported, not read as a quiet year.
+
+    2026-10-04: sfadb answered 2xx with no award blocks; the only trace was
+    "sfadb 0 blocks -> 0 winners" in the small-print Sources line.
+    """
+
+    class _Resp:
+        def __init__(self, text="", payload=None, status_code=200):
+            self.text, self._payload, self.status_code = text, payload, status_code
+
+        def json(self):
+            return self._payload
+
+    @pytest.fixture
+    def offline(self, monkeypatch):
+        import awards
+        monkeypatch.setattr(awards, "_polite_sleep", lambda: None)
+        pages: dict = {}
+        monkeypatch.setattr(awards, "_get", lambda url, params=None: pages.get(
+            "wikipedia" if "wikipedia" in url else "sfadb"))
+        return pages
+
+    def test_real_page_is_healthy(self, offline):
+        import awards
+        offline["sfadb"] = self._Resp((FIXTURES / "sfadb_2026_results.html").read_text(encoding="utf-8"))
+        winners, _, ok = awards.scan_sfadb(2026)
+        assert ok and winners
+
+    def test_2xx_page_without_blocks_is_not_healthy(self, offline):
+        import awards
+        offline["sfadb"] = self._Resp("<html><body>Just a moment…</body></html>")
+        winners, note, ok = awards.scan_sfadb(2026)
+        assert (winners, ok) == ([], False)
+        assert note == "sfadb 0 blocks -> 0 winners"
+
+    def test_fetch_failure_is_not_healthy(self, offline):
+        import awards
+        assert awards.scan_sfadb(2026) == ([], "sfadb 2026 fetch FAILED", False)
+        assert awards.scan_wikipedia(2026)[2] is False
+
+    def test_down_names_only_the_dead_source(self, offline):
+        import awards
+        offline["wikipedia"] = self._Resp(payload=json.loads(
+            (FIXTURES / "wikipedia_2026_in_literature.json").read_text(encoding="utf-8")))
+        winners, notes, down = awards.fetch_award_winners([2026])
+        assert down == ["sfadb"]
+        assert winners and "sfadb 2026 fetch FAILED" in notes
+
+    def test_one_healthy_year_keeps_a_source_up(self, offline, monkeypatch):
+        # January: next year's page may be empty, last year's proves the source is up.
+        import awards
+        monkeypatch.setattr(awards, "scan_sfadb",
+                            lambda year: ([], "x", year == 2025))
+        monkeypatch.setattr(awards, "scan_wikipedia", lambda year: ([], "y", True))
+        assert awards.fetch_award_winners([2026, 2025])[2] == []
+
+    def test_a_crashing_scan_counts_as_down(self, monkeypatch):
+        import awards
+
+        def boom(year):
+            raise RuntimeError("parser exploded")
+        monkeypatch.setattr(awards, "scan_sfadb", boom)
+        monkeypatch.setattr(awards, "scan_wikipedia", lambda year: ([], "y", True))
+        assert awards.fetch_award_winners([2026])[2] == ["sfadb"]
