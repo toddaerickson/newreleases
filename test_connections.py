@@ -2,6 +2,7 @@
 
     python test_connections.py            # one request per source
     python test_connections.py --sweep    # also try every curl_cffi profile on StoryGraph
+    python test_connections.py --sweep-on-fail  # sweep only if the StoryGraph pipeline failed
 
 Run it from the network that matters — the weekly cron runs on GitHub's runners,
 and Cloudflare judges the runner IP as well as the TLS fingerprint, so a pass on a
@@ -104,6 +105,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sweep", action="store_true",
                     help="try every curl_cffi impersonation profile against StoryGraph")
+    ap.add_argument("--sweep-on-fail", action="store_true",
+                    help="sweep only when the StoryGraph pipeline probe fails (weekly.yml); "
+                         "a Goodreads-only failure gains nothing from a StoryGraph sweep")
     args = ap.parse_args()
 
     import curl_cffi
@@ -140,7 +144,7 @@ def main() -> int:
     ]:
         print(f"{name:38} {probe_plain(url, marker, **kw)[1]}")
 
-    if args.sweep:
+    if args.sweep or (args.sweep_on_fail and not sg_ok):
         print("\nStoryGraph profile sweep (browse page):")
         working = []
         for profile in all_profiles():

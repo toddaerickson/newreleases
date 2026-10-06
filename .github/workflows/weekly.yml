@@ -52,11 +52,12 @@ jobs:
       # - if: always()  -> still runs when main.py failed, which is when it matters.
       # - continue-on-error -> its exit 1 (Goodreads/StoryGraph unreachable) must not
       #   turn the run red: StoryGraph is banner-only by design (see CLAUDE.md).
-      # No --sweep: the ~40-profile StoryGraph sweep stays in connections.yml.
+      # --sweep-on-fail: the ~40-request StoryGraph profile sweep runs only when the
+      # StoryGraph pipeline probe failed, and prints which profile to pin.
       - name: Probe sources (diagnostic)
         if: always()
         continue-on-error: true
-        timeout-minutes: 10
-        run: python test_connections.py
+        timeout-minutes: 20
+        run: python test_connections.py --sweep-on-fail
       # NOTE: Enable GitHub Pages once after merging this PR:
       # Repo Settings → Pages → Source: Deploy from branch → Branch: main, Folder: /docs
