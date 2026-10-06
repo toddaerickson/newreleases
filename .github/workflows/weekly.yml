@@ -45,5 +45,18 @@ jobs:
           git diff --cached --quiet || git commit -m "Update shortlist and database for $(date +%Y-%m-%d)"
           git pull --rebase origin main
           git push
+
+      # Live reachability snapshot of every source from this run's runner IP, so a
+      # quiet or failed week can be told apart from a blocked one without a manual
+      # Test Connections run. Diagnostic only, and placed after the commit:
+      # - if: always()  -> still runs when main.py failed, which is when it matters.
+      # - continue-on-error -> its exit 1 (Goodreads/StoryGraph unreachable) must not
+      #   turn the run red: StoryGraph is banner-only by design (see CLAUDE.md).
+      # No --sweep: the ~40-profile StoryGraph sweep stays in connections.yml.
+      - name: Probe sources (diagnostic)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        run: python test_connections.py
       # NOTE: Enable GitHub Pages once after merging this PR:
       # Repo Settings → Pages → Source: Deploy from branch → Branch: main, Folder: /docs
