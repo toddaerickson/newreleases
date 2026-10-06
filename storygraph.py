@@ -40,12 +40,15 @@ ALLOWED_HOSTS = {"app.thestorygraph.com", "thestorygraph.com"}
 # This rots: Cloudflare eventually starts rejecting a given fingerprint and every
 # fetch 403s, which looks exactly like "no new books this week". History:
 #   2026-07-29  chrome/safari/android 403; firefox135 200.
-#   2026-10-06  firefox* (133-147), chrome*, edge*, tor145, safari26* 403;
-#               desktop safari155-safari184 and safari172_ios 200
-#               (curl_cffi 0.16.3, GitHub ubuntu-latest runner).
+#   2026-10-06  two sweeps on GitHub ubuntu-latest runners (curl_cffi 0.16.3):
+#               every firefox*/chrome*/edge*/tor145/safari26* profile 403 in both;
+#               safari155 and safari172_ios 200 in both; safari170/180/184 200 in
+#               one run and 403 in the other. The verdict varies by runner (i.e. by
+#               IP), so no single pin is reliable — the fallback chain below is the
+#               actual defence, the pin is just the best-observed first try.
 # `python test_connections.py --sweep` (or the "Test Connections" workflow) re-runs
-# that sweep; _get also falls back through IMPERSONATE_FALLBACKS on its own.
-IMPERSONATE = "safari184"
+# that sweep.
+IMPERSONATE = "safari155"
 
 REQUEST_DELAY = 2.0  # base seconds between requests, matching the Goodreads scraper
 DEFAULT_MAX_PAGES = 10  # browse pages to scan per run (~10 books/page)
@@ -76,9 +79,9 @@ class _Blocked(Exception):
 
 # Tried, in order, when IMPERSONATE is rejected. Profiles unknown to the installed
 # curl_cffi raise and are skipped, so listing newer ones here is harmless.
-# Ordered: profiles last verified working first, then newer/other families.
+# Ordered by observed pass rate (see IMPERSONATE), then newer/other families.
 IMPERSONATE_FALLBACKS = (
-    "safari180", "safari172_ios", "safari170", "safari155",
+    "safari172_ios", "safari184", "safari180", "safari170",
     "safari2601", "safari260", "firefox147", "firefox135",
     "chrome146", "chrome142", "edge101", "tor145",
 )
